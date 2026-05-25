@@ -1,18 +1,27 @@
-"""Phase A: build the universe of NYSE + NASDAQ tickers and filter by market cap.
+"""Phase A: build the universe from the S&P 500 and filter by market cap.
 
-Ticker source: NASDAQ Trader Symbol Directory (free, official).
-  - nasdaqlisted.txt -> NASDAQ-listed securities
-  - otherlisted.txt  -> NYSE / NYSE MKT / NYSE Arca / BATS securities
+Ticker source: the current S&P 500 constituent list, scraped from the
+canonical Wikipedia page
+    https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
+which is a free, no-key, always-up-to-date source maintained by the
+community and updated when constituents change.
 
-Per the document the system covers NYSE + NASDAQ exchanges only and the
-universe must include Common Stocks, ETFs and ADRs. NYSE Arca (P) and
-NYSE American/AMEX (A) are subsidiaries of NYSE and host most U.S. ETFs;
-they are therefore included under the "NYSE" label, which is also what
-the document requires for the TradingView link in Stage 4.
+Why S&P 500 instead of the full NYSE + NASDAQ universe?
+  * Operator decision (see project history): the previous broad-universe
+    pull triggered a high rate of "market cap unavailable" yfinance
+    failures for the long tail of small / illiquid tickers. Restricting
+    the universe to S&P 500 names — all of which are large-caps with
+    reliable yfinance metadata — eliminates that failure mode while
+    still covering the names the operator cares about.
+  * The market-cap filter (default $1B) is kept exactly as before. In
+    practice every S&P 500 member passes this threshold; the filter is
+    retained so the system still rejects any name whose market cap
+    turns out to be missing or below threshold on a given run.
 
-After the universe is collected, the market cap of every ticker is fetched
-via yfinance.fast_info and filtered to >= configured threshold (default
-$1B).
+After the universe is collected, the market cap AND the listing
+exchange of every ticker are read from yfinance.fast_info in a single
+call. The exchange code is mapped to the "NASDAQ" / "NYSE" label used
+by Stage 4 for the TradingView link.
 """
 from __future__ import annotations
 
@@ -20,6 +29,7 @@ import io
 from dataclasses import dataclass
 from typing import Optional
 
+import pandas as pd
 import requests
 import yfinance as yf
 
@@ -31,19 +41,31 @@ from ma20_screener.logger import (
 )
 from ma20_screener.utils.concurrency import parallel_map
 
-NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
-OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
+SP500_WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+_HTTP_HEADERS = {"User-Agent": "MA20-Screener/1.0 (+https://github.com/oshrimoyal/MA20-screener)"}
 
-# Exchange codes that map to "NYSE" in otherlisted.txt:
-#   N = NYSE, A = NYSE American (AMEX), P = NYSE Arca
-# BATS (Z) is a separate venue and is excluded.
-_NYSE_GROUP_CODES = {"N", "A", "P"}
+# yfinance fast_info "exchange" codes -> Stage 4 link label.
+# (NMS/NCM/NGM/NGS = NASDAQ tiers; NYQ = NYSE; ASE/PCX = NYSE American / NYSE
+# Arca, both NYSE Group venues and labelled "NYSE" for the TradingView link.)
+_EXCH_CODE_TO_LABEL = {
+    "NMS": "NASDAQ",
+    "NCM": "NASDAQ",
+    "NGM": "NASDAQ",
+    "NGS": "NASDAQ",
+    "NAS": "NASDAQ",
+    "NASDAQ": "NASDAQ",
+    "NYQ": "NYSE",
+    "NYS": "NYSE",
+    "NYSE": "NYSE",
+    "ASE": "NYSE",
+    "PCX": "NYSE",
+    "ARCA": "NYSE",
+}
 
 
 @dataclass(frozen=True)
 class Symbol:
     ticker: str            # yfinance-style ticker (dots replaced with dashes)
-    exchange: str          # "NYSE" or "NASDAQ" (used for the TradingView link)
 
 
 @dataclass(frozen=True)
@@ -53,104 +75,76 @@ class UniverseEntry:
     market_cap: float
 
 
-def _fetch_text(url: str, timeout_s: int = 30) -> str:
-    resp = requests.get(url, timeout=timeout_s)
+def fetch_sp500_tickers() -> list[Symbol]:
+    """Download the current S&P 500 constituent list from Wikipedia and
+    return it as a list of Symbol records. Tickers are normalised to
+    yfinance form (e.g. "BRK.B" -> "BRK-B")."""
+    log = get_logger()
+    resp = requests.get(SP500_WIKIPEDIA_URL, headers=_HTTP_HEADERS, timeout=30)
     resp.raise_for_status()
-    return resp.text
 
+    # pandas.read_html requires lxml or html5lib; lxml is in requirements.txt.
+    tables = pd.read_html(io.StringIO(resp.text))
+    if not tables:
+        raise RuntimeError("Wikipedia S&P 500 page returned no parseable tables.")
 
-def _parse_nasdaq_listed(text: str) -> list[Symbol]:
-    out: list[Symbol] = []
-    lines = text.splitlines()
-    if not lines:
-        return out
-    header = lines[0].split("|")
-    # Expected: Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
-    try:
-        i_sym = header.index("Symbol")
-        i_test = header.index("Test Issue")
-    except ValueError as e:
-        raise RuntimeError(f"Unexpected nasdaqlisted.txt header: {header}") from e
+    # The first table on the page is the constituent list; find the
+    # column that holds the ticker symbol (the column has been called
+    # "Symbol" historically, occasionally "Ticker symbol").
+    constituents = tables[0]
+    cols = list(constituents.columns)
+    sym_col: Optional[str] = None
+    for c in cols:
+        name = str(c).strip().lower()
+        if name in ("symbol", "ticker", "ticker symbol"):
+            sym_col = c
+            break
+    if sym_col is None:
+        raise RuntimeError(
+            f"S&P 500 Wikipedia table has unexpected columns: {cols}"
+        )
 
-    for line in lines[1:]:
-        if not line or line.startswith("File Creation Time"):
+    symbols: list[Symbol] = []
+    seen: set[str] = set()
+    for raw in constituents[sym_col].astype(str):
+        t = raw.strip().upper().replace(".", "-")
+        if not t or t in seen:
             continue
-        cols = line.split("|")
-        if len(cols) <= max(i_sym, i_test):
-            continue
-        symbol = cols[i_sym].strip()
-        if not symbol:
-            continue
-        if cols[i_test].strip() != "N":
-            continue
-        out.append(Symbol(ticker=symbol.replace(".", "-"), exchange="NASDAQ"))
-    return out
+        seen.add(t)
+        symbols.append(Symbol(ticker=t))
+    log.info(f"Phase A: parsed {len(symbols)} S&P 500 tickers from Wikipedia.")
+    return symbols
 
 
-def _parse_other_listed(text: str) -> list[Symbol]:
-    out: list[Symbol] = []
-    lines = text.splitlines()
-    if not lines:
-        return out
-    header = lines[0].split("|")
-    # Expected: ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
-    try:
-        i_sym = header.index("ACT Symbol")
-        i_exch = header.index("Exchange")
-        i_test = header.index("Test Issue")
-    except ValueError as e:
-        raise RuntimeError(f"Unexpected otherlisted.txt header: {header}") from e
-
-    for line in lines[1:]:
-        if not line or line.startswith("File Creation Time"):
-            continue
-        cols = line.split("|")
-        if len(cols) <= max(i_sym, i_exch, i_test):
-            continue
-        symbol = cols[i_sym].strip()
-        exch = cols[i_exch].strip()
-        test = cols[i_test].strip()
-        if not symbol or test != "N":
-            continue
-        if exch not in _NYSE_GROUP_CODES:
-            continue
-        out.append(Symbol(ticker=symbol.replace(".", "-"), exchange="NYSE"))
-    return out
-
-
-def fetch_symbol_directory() -> list[Symbol]:
-    """Download both NASDAQ Trader files and return the merged ticker list,
-    test issues already filtered out."""
-    nasdaq_text = _fetch_text(NASDAQ_LISTED_URL)
-    other_text = _fetch_text(OTHER_LISTED_URL)
-    nasdaq_syms = _parse_nasdaq_listed(nasdaq_text)
-    other_syms = _parse_other_listed(other_text)
-    # Deduplicate by ticker (NASDAQ wins on conflict, which is expected).
-    seen: dict[str, Symbol] = {}
-    for s in nasdaq_syms + other_syms:
-        seen.setdefault(s.ticker, s)
-    return list(seen.values())
-
-
-def _get_market_cap(ticker: str) -> Optional[float]:
-    """Return market cap in USD for `ticker`, or None if unavailable.
-
-    yfinance.fast_info exposes the field as `marketCap` (camelCase); the
-    snake_case alias `market_cap` exists but its underlying attribute
-    chain triggers a full info fetch that is fragile in production. We
-    therefore query `marketCap` directly.
+def _get_market_cap_and_exchange(ticker: str) -> tuple[Optional[float], Optional[str]]:
+    """Return (market_cap_usd, exchange_code) for `ticker` via
+    yfinance.fast_info (single HTTP round-trip). Returns (None, code) if
+    market cap is missing but exchange is known, or (None, None) on
+    any error.
     """
     try:
         fi = yf.Ticker(ticker).fast_info
         mc = fi.get("marketCap") if hasattr(fi, "get") else None
+        ex = fi.get("exchange") if hasattr(fi, "get") else None
+        ex_str = str(ex).strip() if ex is not None else None
         if mc is None:
-            return None
-        mc = float(mc)
-        if mc <= 0:
-            return None
-        return mc
+            return None, ex_str
+        mc_f = float(mc)
+        if mc_f <= 0:
+            return None, ex_str
+        return mc_f, ex_str
     except Exception:
-        return None
+        return None, None
+
+
+def _label_for_exchange(code: Optional[str]) -> str:
+    """Map an yfinance exchange code to "NASDAQ" or "NYSE" for the
+    TradingView link in Stage 4. Unknown codes fall back to "NYSE",
+    which is the larger of the two venues by S&P 500 membership and a
+    safer default than the opposite."""
+    if not code:
+        return "NYSE"
+    return _EXCH_CODE_TO_LABEL.get(code.upper(), "NYSE")
 
 
 def run_phase_a(
@@ -160,39 +154,48 @@ def run_phase_a(
     test_tickers: list[str] | None = None,
 ) -> list[UniverseEntry]:
     """Execute Phase A end-to-end:
-       1. Fetch the NYSE+NASDAQ symbol directory (or use test_tickers).
-       2. Look up market cap for each.
+       1. Fetch the S&P 500 constituent list (or use test_tickers).
+       2. Look up market cap + listing exchange for each via yfinance.
        3. Keep only tickers with market cap >= min_market_cap_usd.
     """
     log = get_logger()
-    log_stage_start("STAGE 1 — Phase A (universe + market cap filter)")
+    log_stage_start("STAGE 1 — Phase A (S&P 500 + market cap filter)")
 
     if test_tickers:
         log.info(f"Phase A: using TEST ticker override: {test_tickers}")
-        symbols = [Symbol(ticker=t.replace(".", "-"), exchange="NASDAQ") for t in test_tickers]
+        symbols = [Symbol(ticker=t.replace(".", "-")) for t in test_tickers]
     else:
-        log.info("Phase A: downloading NASDAQ Trader symbol directory…")
-        symbols = fetch_symbol_directory()
-        log.info(f"Phase A: {len(symbols)} symbols fetched from NASDAQ Trader (after test-issue filter).")
+        log.info("Phase A: fetching S&P 500 constituent list from Wikipedia…")
+        symbols = fetch_sp500_tickers()
 
-    def _lookup(sym: Symbol) -> tuple[Symbol, Optional[float]]:
-        return sym, _get_market_cap(sym.ticker)
+    def _lookup(sym: Symbol) -> tuple[Symbol, Optional[float], Optional[str]]:
+        mc, ex = _get_market_cap_and_exchange(sym.ticker)
+        return sym, mc, ex
 
     log.info(
-        f"Phase A: looking up market cap for {len(symbols)} tickers "
+        f"Phase A: looking up market cap + exchange for {len(symbols)} tickers "
         f"(workers={workers}, sleep_ms={fetch_sleep_ms})…"
     )
-    pairs = parallel_map(_lookup, symbols, workers=workers, sleep_ms=fetch_sleep_ms)
+    triples = parallel_map(_lookup, symbols, workers=workers, sleep_ms=fetch_sleep_ms)
 
     universe: list[UniverseEntry] = []
-    for sym, mc in pairs:
+    for sym, mc, ex_code in triples:
         if mc is None:
             log_ticker_fail(sym.ticker, "market cap unavailable")
             continue
         if mc < min_market_cap_usd:
-            log_ticker_fail(sym.ticker, f"market cap ${mc:,.0f} below ${min_market_cap_usd:,.0f}")
+            log_ticker_fail(
+                sym.ticker,
+                f"market cap ${mc:,.0f} below ${min_market_cap_usd:,.0f}",
+            )
             continue
-        universe.append(UniverseEntry(ticker=sym.ticker, exchange=sym.exchange, market_cap=mc))
+        universe.append(
+            UniverseEntry(
+                ticker=sym.ticker,
+                exchange=_label_for_exchange(ex_code),
+                market_cap=mc,
+            )
+        )
 
     log_stage_summary("STAGE 1 — Phase A", entered=len(symbols), passed=len(universe))
     return universe

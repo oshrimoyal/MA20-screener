@@ -7,3 +7,6 @@ pandas_market_calendars>=4.3.0
 PyYAML>=6.0
 pytz>=2023.3
 requests>=2.31.0
+# lxml is required by pandas.read_html for the S&P 500 Wikipedia parse
+# in stage1_data/phase_a_universe.py
+lxml>=4.9.0
