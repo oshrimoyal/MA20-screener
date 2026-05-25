@@ -1,0 +1,28 @@
+# MA20 Screener — Configuration file
+# Edit the values below to match your environment. Do not edit the code itself.
+
+telegram:
+  # Telegram bot token (from BotFather). Required for Stage 4 (sending candidates).
+  token: "PUT-YOUR-BOT-TOKEN-HERE"
+  # Telegram chat ID to receive candidate messages.
+  chat_id: "PUT-YOUR-CHAT-ID-HERE"
+
+paths:
+  # Directory where the daily CSV file will be written.
+  csv_dir: "./output"
+  # Directory where log files will be written.
+  log_dir: "./logs"
+
+runtime:
+  # Number of parallel worker threads used when fetching from yfinance.
+  # 10 is a safe default. Raise carefully (rate-limit risk).
+  workers: 10
+  # Sleep in milliseconds between yfinance calls per worker (throttling).
+  fetch_sleep_ms: 100
+  # Minimum market capitalization threshold in USD (Phase A).
+  min_market_cap_usd: 1000000000
+  # Number of trading days of OHLCV history required (Phase B).
+  history_trading_days: 60
+  # Optional: limit Phase A to this comma-separated list of tickers (testing).
+  # Leave empty for a full universe scan.
+  test_tickers: ""
