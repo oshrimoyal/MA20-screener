@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.python-version
+.venv/
+venv/
+
+# Runtime outputs — produced by the screener at run time.
+logs/*.log
+output/*.csv
+
+# Local config overrides
+config.local.yaml
+config.test.yaml
