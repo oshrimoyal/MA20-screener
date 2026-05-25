@@ -17,6 +17,7 @@ from datetime import datetime
 from ma20_screener.config_loader import load_config
 from ma20_screener.logger import get_logger, setup_logger
 from ma20_screener.stage1_data.orchestrator import run_stage1
+from ma20_screener.stage2_checks.orchestrator import run_stage2
 
 
 def main() -> int:
@@ -39,20 +40,24 @@ def main() -> int:
 
     t0 = time.time()
     stage1_results = run_stage1(cfg)
+    stage2_results = run_stage2(stage1_results)
     elapsed = time.time() - t0
 
     log.info("-" * 60)
-    log.info(f"STAGE 1 complete — {len(stage1_results)} tickers ready for Stage 2")
-    for td in stage1_results[:10]:
+    log.info(
+        f"STAGE 1 → STAGE 2 complete: stage1={len(stage1_results)} stage2={len(stage2_results)}"
+    )
+    for s in stage2_results[:10]:
         log.info(
-            f"  {td.ticker} ({td.exchange}) "
-            f"close={td.ohlcv['Close'].iloc[-1]:.2f} "
-            f"SMA20={td.sma_20:.4f} ATR%={td.atr_14_pct:.3f} "
-            f"CCI={td.cci_today:.2f} (prev {td.cci_yesterday:.2f}) "
-            f"open_gaps={len(td.open_gaps)}"
+            f"  {s.ticker} ({s.exchange}) "
+            f"month={s.trend.monthly} week={s.trend.weekly} "
+            f"candle={s.candle.color}({','.join(s.candle.formations) or '-'}) "
+            f"SMA20={s.sma_position.position}/{s.sma_position.distance_label} "
+            f"gaps(↑{s.gaps.has_gap_above}↓{s.gaps.has_gap_below}=){s.gaps.price_inside_gap} "
+            f"CCI={s.cci.cci_today:.1f}({s.cci.slope_direction})"
         )
-    if len(stage1_results) > 10:
-        log.info(f"  … and {len(stage1_results) - 10} more")
+    if len(stage2_results) > 10:
+        log.info(f"  … and {len(stage2_results) - 10} more")
 
     log.info(f"Total runtime: {elapsed:.1f} s")
     return 0
