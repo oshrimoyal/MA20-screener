@@ -17,12 +17,14 @@ Universe sources:
                                 "Z" per operator decision)
          Test Issue   == "N"   (drop test issues)
          ETF          == "N"   (operator asked for stocks only)
-  Both sources additionally drop any symbol containing the "$"
-  character. In NASDAQ Trader / yfinance notation "$" inside a symbol
-  marks a preferred-share series (e.g. "ABR$D", "AGM$E"); these are
-  not common stocks and are out of scope. Removing them at parse
-  time also saves the wasted yfinance round-trips that those symbols
-  would otherwise consume in the marketCap lookup.
+  Both sources additionally drop any symbol that contains "$" from
+  position 2 onwards (an internal "$"). In NASDAQ Trader / yfinance
+  notation an internal "$" marks a preferred-share series (e.g.
+  "ABR$D", "AGM$E"); these are not common stocks and are out of
+  scope. A leading "$" (not used by any current ticker but allowed
+  by this rule) is preserved. Removing the internal-"$" symbols at
+  parse time also saves the wasted yfinance round-trips that those
+  symbols would otherwise consume in the marketCap lookup.
 
   The two lists are merged and deduplicated by ticker; an entry that
   appears in both sources is included exactly once.
@@ -130,13 +132,16 @@ def fetch_sp500_tickers() -> list[Symbol]:
         t = raw.strip().upper().replace(".", "-")
         if not t or t in seen:
             continue
-        # Operator decision: drop any ticker that contains "$".
-        # In NASDAQ Trader / yfinance notation, "$" inside a symbol
-        # marks a preferred-share series (e.g. ABR$D, AGM$E) — these
-        # are not common stocks and are out of scope for this screener.
-        # This branch is defensive for Wikipedia (the S&P 500 list
-        # does not contain preferred shares in practice).
-        if "$" in t:
+        # Operator decision: drop any ticker that contains "$" from
+        # position 2 onwards (i.e. "$" inside the ticker, not as a
+        # leading character). In NASDAQ Trader / yfinance notation an
+        # internal "$" marks a preferred-share series (e.g. ABR$D,
+        # AGM$E) — these are not common stocks and are out of scope.
+        # A leading "$" (no real ticker uses one today, but it is
+        # allowed by this rule) is preserved. This branch is
+        # defensive for Wikipedia; the S&P 500 list does not contain
+        # preferred shares in practice.
+        if "$" in t[1:]:
             skipped_dollar += 1
             continue
         seen.add(t)
@@ -199,13 +204,16 @@ def fetch_nyse_stocks() -> list[Symbol]:
             continue
         if etf != "N":        # exclude ETFs
             continue
-        # Operator decision: drop any ticker that contains "$".
-        # NASDAQ Trader uses "$" as the preferred-series separator
-        # (e.g. "ABR$D", "AGM$E") — these are preferred shares, not
-        # common stock, and out of scope for this screener. Removing
-        # them here saves ~475 wasted yfinance round-trips per run
-        # observed previously and keeps the log clean.
-        if "$" in symbol:
+        # Operator decision: drop any ticker that contains "$" from
+        # position 2 onwards. NASDAQ Trader uses "$" as the
+        # preferred-series separator (e.g. "ABR$D", "AGM$E") — these
+        # are preferred shares, not common stock, and out of scope
+        # for this screener. A leading "$" (not used by any current
+        # ticker but allowed by this rule) is preserved. Removing
+        # internal-"$" symbols here saves ~475 wasted yfinance
+        # round-trips per run observed previously and keeps the log
+        # clean.
+        if "$" in symbol[1:]:
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
