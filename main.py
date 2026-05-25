@@ -1,8 +1,8 @@
 """MA20 Screener — entry point.
 
-Stage B (current scope): runs Stage 1 only and prints a summary of the
-final tickers ready for Stage 2. Stages 2-4 will be wired in here in
-subsequent iterations.
+Orchestrates the four stages:
+    Stage 1 (data infrastructure) -> Stage 2 (raw checks)
+    -> Stage 3 (six-category filter) -> Stage 4 (CSV + Telegram).
 
 Usage:
     python main.py               # full run using config.yaml
@@ -18,6 +18,10 @@ from ma20_screener.config_loader import load_config
 from ma20_screener.logger import get_logger, setup_logger
 from ma20_screener.stage1_data.orchestrator import run_stage1
 from ma20_screener.stage2_checks.orchestrator import run_stage2
+from ma20_screener.stage3_filter.filter import run_stage3
+from ma20_screener.stage4_output.csv_writer import write_csv
+from ma20_screener.stage4_output.telegram_sender import send_candidates
+from ma20_screener.utils.market_time import get_last_closed_trading_day
 
 
 def main() -> int:
@@ -41,24 +45,21 @@ def main() -> int:
     t0 = time.time()
     stage1_results = run_stage1(cfg)
     stage2_results = run_stage2(stage1_results)
-    elapsed = time.time() - t0
+    decisions = run_stage3(stage2_results)
 
+    # The "run date" used for the CSV file name and Telegram header is the
+    # date of the last closed trading day (i.e. the candle we analysed).
+    run_date = get_last_closed_trading_day().date()
+    csv_path = write_csv(decisions, cfg.paths.csv_dir, run_date)
+    passed = [d for d in decisions if d.passed]
+    send_candidates(passed, cfg.telegram.token, cfg.telegram.chat_id, run_date)
+
+    elapsed = time.time() - t0
     log.info("-" * 60)
     log.info(
-        f"STAGE 1 → STAGE 2 complete: stage1={len(stage1_results)} stage2={len(stage2_results)}"
+        f"DONE: stage1={len(stage1_results)} stage2={len(stage2_results)} "
+        f"stage3_passed={len(passed)} csv={csv_path}"
     )
-    for s in stage2_results[:10]:
-        log.info(
-            f"  {s.ticker} ({s.exchange}) "
-            f"month={s.trend.monthly} week={s.trend.weekly} "
-            f"candle={s.candle.color}({','.join(s.candle.formations) or '-'}) "
-            f"SMA20={s.sma_position.position}/{s.sma_position.distance_label} "
-            f"gaps(↑{s.gaps.has_gap_above}↓{s.gaps.has_gap_below}=){s.gaps.price_inside_gap} "
-            f"CCI={s.cci.cci_today:.1f}({s.cci.slope_direction})"
-        )
-    if len(stage2_results) > 10:
-        log.info(f"  … and {len(stage2_results) - 10} more")
-
     log.info(f"Total runtime: {elapsed:.1f} s")
     return 0
 
