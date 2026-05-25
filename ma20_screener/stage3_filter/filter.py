@@ -1,9 +1,20 @@
 """Stage 3 — six-category filter (AND between categories).
 
-A ticker passes iff every category passes. The function also reports
-which categories failed (for the CSV "Reason" column) and, when
+A ticker passes iff every active category passes. The function also
+reports which categories failed (for the CSV "Reason" column) and, when
 Category 3 fails, whether the failure was caused by a negative filter
 (filter a or filter b) — this is reported separately per the document.
+
+NOTE — Category 1 disabled.
+    Per operator decision, Category 1 (monthly + weekly trend) is NOT
+    used as a filter factor. Check 1 in Stage 2 still runs and produces
+    the monthly/weekly trend status, which is still written to the CSV
+    (Trend_Month, Trend_Week columns) and the Telegram message. Only
+    the pass/reject decision below ignores Category 1. The _eval_cat1
+    helper is intentionally kept in this file as the canonical
+    implementation of the original spec, in case the filter is
+    re-enabled later — to re-enable, restore the call site in
+    `evaluate()`.
 
 For passing tickers we additionally surface:
   * volume_positive_option (1-4): which Category 3 positive option held —
@@ -53,6 +64,8 @@ class FilterDecision:
 
 
 # Category 1 — trend combinations -----------------------------------------
+# Kept for documentation / future re-enable. Not used by `evaluate()` —
+# see the module docstring for context.
 
 _VALID_TREND_PAIRS = frozenset({
     ("rising", "falling"),
@@ -185,7 +198,12 @@ def _eval_cat6(s2: Stage2Result) -> bool:
 # Entry points -------------------------------------------------------------
 
 def evaluate(s2: Stage2Result) -> FilterDecision:
-    cat1 = _eval_cat1(s2)
+    # Category 1 is intentionally not evaluated for the pass/reject
+    # decision (operator decision — see module docstring). The monthly
+    # and weekly trend are still computed by Stage 2 and surfaced in
+    # the CSV and Telegram output via `s2.trend`. To re-enable
+    # filtering by trend, restore the `cat1 = _eval_cat1(s2)` call and
+    # its `failed.append(1)` branch below.
     cat2 = _eval_cat2(s2)
     cat3_passed, cat3_negative, vol_opt = _eval_cat3(s2)
     cat4 = _eval_cat4(s2)
@@ -193,8 +211,7 @@ def evaluate(s2: Stage2Result) -> FilterDecision:
     cat6 = _eval_cat6(s2)
 
     failed: list[int] = []
-    if not cat1:
-        failed.append(1)
+    # Category 1 deliberately omitted.
     if not cat2:
         failed.append(2)
     if not cat3_passed:
