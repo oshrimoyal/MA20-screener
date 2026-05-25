@@ -17,6 +17,13 @@ Universe sources:
                                 "Z" per operator decision)
          Test Issue   == "N"   (drop test issues)
          ETF          == "N"   (operator asked for stocks only)
+  Both sources additionally drop any symbol containing the "$"
+  character. In NASDAQ Trader / yfinance notation "$" inside a symbol
+  marks a preferred-share series (e.g. "ABR$D", "AGM$E"); these are
+  not common stocks and are out of scope. Removing them at parse
+  time also saves the wasted yfinance round-trips that those symbols
+  would otherwise consume in the marketCap lookup.
+
   The two lists are merged and deduplicated by ticker; an entry that
   appears in both sources is included exactly once.
 
@@ -118,12 +125,27 @@ def fetch_sp500_tickers() -> list[Symbol]:
 
     symbols: list[Symbol] = []
     seen: set[str] = set()
+    skipped_dollar = 0
     for raw in constituents[sym_col].astype(str):
         t = raw.strip().upper().replace(".", "-")
         if not t or t in seen:
             continue
+        # Operator decision: drop any ticker that contains "$".
+        # In NASDAQ Trader / yfinance notation, "$" inside a symbol
+        # marks a preferred-share series (e.g. ABR$D, AGM$E) — these
+        # are not common stocks and are out of scope for this screener.
+        # This branch is defensive for Wikipedia (the S&P 500 list
+        # does not contain preferred shares in practice).
+        if "$" in t:
+            skipped_dollar += 1
+            continue
         seen.add(t)
         symbols.append(Symbol(ticker=t))
+    if skipped_dollar:
+        log.info(
+            f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
+            f"S&P 500 list (preferred shares)."
+        )
     log.info(f"Phase A: parsed {len(symbols)} S&P 500 tickers from Wikipedia.")
     return symbols
 
@@ -157,6 +179,7 @@ def fetch_nyse_stocks() -> list[Symbol]:
 
     out: list[Symbol] = []
     seen: set[str] = set()
+    skipped_dollar = 0
     max_idx = max(i_sym, i_exch, i_etf, i_test)
     for line in lines[1:]:
         if not line or line.startswith("File Creation Time"):
@@ -176,14 +199,28 @@ def fetch_nyse_stocks() -> list[Symbol]:
             continue
         if etf != "N":        # exclude ETFs
             continue
+        # Operator decision: drop any ticker that contains "$".
+        # NASDAQ Trader uses "$" as the preferred-series separator
+        # (e.g. "ABR$D", "AGM$E") — these are preferred shares, not
+        # common stock, and out of scope for this screener. Removing
+        # them here saves ~475 wasted yfinance round-trips per run
+        # observed previously and keeps the log clean.
+        if "$" in symbol:
+            skipped_dollar += 1
+            continue
         ticker = symbol.replace(".", "-").upper()
         if ticker in seen:
             continue
         seen.add(ticker)
         out.append(Symbol(ticker=ticker))
+    if skipped_dollar:
+        log.info(
+            f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
+            f"NYSE list (preferred-share series)."
+        )
     log.info(
         f"Phase A: parsed {len(out)} NYSE-proper stock tickers "
-        f"from NASDAQ Trader (Exchange=N, Test=N, ETF=N)."
+        f"from NASDAQ Trader (Exchange=N, Test=N, ETF=N, no '$')."
     )
     return out
 
