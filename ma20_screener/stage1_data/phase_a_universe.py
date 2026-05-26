@@ -26,15 +26,13 @@ Universe sources:
          Test Issue     == "N"
          ETF            == "N"
 
-  All four sources additionally drop any symbol that contains "$"
-  from position 2 onwards (an internal "$"). In NASDAQ Trader /
-  yfinance notation an internal "$" marks a preferred-share series
-  (e.g. "ABR$D", "AGM$E"); these are not common stocks and are out
-  of scope. A leading "$" (not used by any current ticker but
-  allowed by this rule) is preserved. Removing the internal-"$"
-  symbols at parse time also saves the wasted yfinance round-trips
-  that those symbols would otherwise consume in the marketCap
-  lookup.
+  All four sources additionally drop any symbol that contains the
+  "$" character at any position. In NASDAQ Trader / yfinance notation
+  "$" inside a symbol marks a preferred-share series (e.g. "ABR$D",
+  "AGM$E"); these are not common stocks and are out of scope.
+  Removing them at parse time also saves the wasted yfinance
+  round-trips that those symbols would otherwise consume in the
+  marketCap lookup.
 
   The four lists are merged and deduplicated by ticker; an entry
   that appears in more than one source is included exactly once.
@@ -145,16 +143,13 @@ def fetch_sp500_tickers() -> list[Symbol]:
         t = raw.strip().upper().replace(".", "-")
         if not t or t in seen:
             continue
-        # Operator decision: drop any ticker that contains "$" from
-        # position 2 onwards (i.e. "$" inside the ticker, not as a
-        # leading character). In NASDAQ Trader / yfinance notation an
-        # internal "$" marks a preferred-share series (e.g. ABR$D,
-        # AGM$E) — these are not common stocks and are out of scope.
-        # A leading "$" (no real ticker uses one today, but it is
-        # allowed by this rule) is preserved. This branch is
-        # defensive for Wikipedia; the S&P 500 list does not contain
-        # preferred shares in practice.
-        if "$" in t[1:]:
+        # Operator decision: drop any ticker that contains "$" at
+        # any position. NASDAQ Trader / yfinance notation uses "$" as
+        # the preferred-share series marker (e.g. ABR$D, AGM$E) —
+        # these are not common stocks and are out of scope. This
+        # branch is defensive for Wikipedia; the S&P 500 list does
+        # not contain preferred shares in practice.
+        if "$" in t:
             skipped_dollar += 1
             continue
         seen.add(t)
@@ -175,7 +170,7 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
     code and apply the standard filters.
 
     Filters: Exchange == `exchange_code`, Test Issue == "N", ETF == "N",
-    no internal "$" in the symbol (leading "$" is preserved).
+    and no "$" anywhere in the symbol.
     `label` is used only for log lines (e.g. "NYSE-proper", "NYSE American").
     """
     log = get_logger()
@@ -215,12 +210,11 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
             continue
         if etf != "N":        # exclude ETFs
             continue
-        # Operator decision: drop any ticker that contains "$" from
-        # position 2 onwards. NASDAQ Trader uses "$" as the
-        # preferred-series separator (e.g. "ABR$D", "AGM$E"). A
-        # leading "$" is preserved (allowed by the rule though no
-        # ticker currently uses one).
-        if "$" in symbol[1:]:
+        # Operator decision: drop any ticker that contains "$" at
+        # any position. NASDAQ Trader uses "$" as the preferred-
+        # series separator (e.g. "ABR$D", "AGM$E"); these are not
+        # common stocks and are out of scope.
+        if "$" in symbol:
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
@@ -235,7 +229,7 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
         )
     log.info(
         f"Phase A: parsed {len(out)} {label} stock tickers "
-        f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, no internal '$')."
+        f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, no '$')."
     )
     return out
 
@@ -265,7 +259,7 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
 
     Filters: Market Category="Q" (NASDAQ Global Select only — excludes
     Global Market "G" and Capital Market "S"), Test Issue="N",
-    ETF="N", and no internal "$" in the symbol.
+    ETF="N", and no "$" anywhere in the symbol.
     """
     log = get_logger()
     resp = requests.get(NASDAQ_LISTED_URL, headers=_HTTP_HEADERS, timeout=30)
@@ -308,8 +302,9 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
             continue
         if etf != "N":          # exclude ETFs
             continue
-        # Same internal-'$' rule as the other sources.
-        if "$" in symbol[1:]:
+        # Same '$' rule as the other sources: drop if '$' appears
+        # anywhere in the symbol.
+        if "$" in symbol:
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
@@ -324,7 +319,7 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
         )
     log.info(
         f"Phase A: parsed {len(out)} NASDAQ Global Select stock tickers "
-        f"from NASDAQ Trader (Market Cat=Q, Test=N, ETF=N, no internal '$')."
+        f"from NASDAQ Trader (Market Cat=Q, Test=N, ETF=N, no '$')."
     )
     return out
 
