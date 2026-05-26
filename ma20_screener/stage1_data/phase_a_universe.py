@@ -26,18 +26,31 @@ Universe sources:
          Test Issue     == "N"
          ETF            == "N"
 
-  All four sources additionally drop two more classes of non-common-
+  All four sources additionally drop three more classes of non-common-
   stock symbols at parse time:
     a) Any symbol that contains the "$" character at any position
        (NASDAQ Trader uses "$" as the preferred-share-series
        separator, e.g. "ABR$D", "AGM$E").
     b) Any symbol ending in a warrant / unit / right suffix —
        "-W", "-WS", "-WT", "-WI", "-WD", "-U", "-UN", "-R", "-RT",
-       "-RW". These are not common stocks and yfinance does not
-       return a market cap for them.
-  Removing these at parse time also saves the wasted yfinance
-  round-trips that those symbols would otherwise consume in the
-  marketCap lookup.
+       "-RW".
+    c) Any entry whose Security Name clearly identifies a non-common-
+       stock instrument (e.g. "5.875% Subordinated Debentures",
+       "Class A Preferred Limited Partnership Units", "Trust
+       Preferred Securities"). The exact pattern list is in
+       `_NON_COMMON_STOCK_NAME_PATTERNS`. ADRs labelled "American
+       Depositary Receipts" are intentionally preserved.
+  Removing these at parse time also saves the thousands of wasted
+  yfinance round-trips that those symbols would otherwise consume in
+  the marketCap lookup.
+
+The marketCap lookup itself uses a bounded retry with exponential
+backoff (see `_get_market_cap_and_exchange_with_retry`). When every
+attempt raises, the per-ticker log line includes the exception type
+and message (typical: `YFRateLimitError`, `JSONDecodeError`,
+`HTTPError`) instead of the generic "market cap unavailable" — so the
+operator can distinguish a genuine missing-marketCap (Yahoo answered
+cleanly) from a rate-limit hit (Yahoo refused).
 
   The four lists are merged and deduplicated by ticker; an entry
   that appears in more than one source is included exactly once.
@@ -59,6 +72,7 @@ the TradingView link used in Stage 4.
 from __future__ import annotations
 
 import io
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -116,6 +130,46 @@ def _looks_like_non_common_stock(ticker: str) -> bool:
     NASDAQ Trader convention. `ticker` is already in yfinance form
     (i.e. "." has been replaced with "-")."""
     return any(ticker.endswith(sfx) for sfx in _NON_COMMON_STOCK_SUFFIXES)
+
+
+# Substrings in the NASDAQ Trader "Security Name" column that mark a
+# non-common-stock instrument (preferred shares, debentures, subordinated
+# notes, etc.). Matching is case-insensitive. The patterns are chosen
+# conservatively to avoid false positives:
+#   * "Preferred Stock"   — preferred shares marketed as stock
+#   * "Preferred Share"   — singular/plural preferred shares
+#   * "Preferred Limited" — preferred Limited Partnership units
+#   * "% Preferred"       — "5.250% Preferred ..." style names
+#   * "Subordinated"      — Subordinated Debentures / Subordinated Notes
+#   * "Debenture"         — any debenture
+#   * "Senior Note"       — Senior Notes
+#   * "Trust Preferred"
+#   * "Convertible Preferred"
+# Note: a legitimate stock named "Preferred Bank" is NOT caught (the
+# substring "Preferred Stock" does not appear in "Preferred Bank Common
+# Stock"). ADRs labelled "American Depositary Receipts" are also NOT
+# caught (no pattern targets that wording).
+_NON_COMMON_STOCK_NAME_PATTERNS = (
+    "preferred stock",
+    "preferred share",
+    "preferred limited",
+    "% preferred",
+    "subordinated",
+    "debenture",
+    "senior note",
+    "trust preferred",
+    "convertible preferred",
+)
+
+
+def _looks_like_non_common_stock_by_name(security_name: str) -> bool:
+    """True if the NASDAQ Trader Security Name clearly identifies a
+    non-common-stock instrument (preferred / debenture / note / trust
+    preferred). Case-insensitive substring match."""
+    if not security_name:
+        return False
+    lower = security_name.lower()
+    return any(pat in lower for pat in _NON_COMMON_STOCK_NAME_PATTERNS)
 
 
 @dataclass(frozen=True)
@@ -207,6 +261,7 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
     # ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
     try:
         i_sym = header.index("ACT Symbol")
+        i_name = header.index("Security Name")
         i_exch = header.index("Exchange")
         i_etf = header.index("ETF")
         i_test = header.index("Test Issue")
@@ -217,7 +272,8 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
     seen: set[str] = set()
     skipped_dollar = 0
     skipped_suffix = 0
-    max_idx = max(i_sym, i_exch, i_etf, i_test)
+    skipped_name = 0
+    max_idx = max(i_sym, i_name, i_exch, i_etf, i_test)
     for line in lines[1:]:
         if not line or line.startswith("File Creation Time"):
             continue
@@ -225,6 +281,7 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
         if len(cols) <= max_idx:
             continue
         symbol = cols[i_sym].strip()
+        sec_name = cols[i_name].strip()
         exchange = cols[i_exch].strip()
         etf = cols[i_etf].strip()
         test = cols[i_test].strip()
@@ -251,6 +308,17 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
         if _looks_like_non_common_stock(ticker):
             skipped_suffix += 1
             continue
+        # Operator decision: drop entries whose Security Name clearly
+        # marks a preferred / debenture / subordinated-note / trust-
+        # preferred instrument — names like "American Financial Group
+        # 5.875% Subordinated Debentures" or "Brookfield Renewable
+        # 5.250% Class A Preferred Limited Partnership Units". yfinance
+        # does not return a marketCap for these; filtering them here
+        # eliminates ~1500-2000 wasted round-trips per run in the
+        # production universe.
+        if _looks_like_non_common_stock_by_name(sec_name):
+            skipped_name += 1
+            continue
         if ticker in seen:
             continue
         seen.add(ticker)
@@ -265,10 +333,15 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
             f"Phase A: dropped {skipped_suffix} warrant/unit/right tickers "
             f"from {label} list (suffix -W/-U/-R variants)."
         )
+    if skipped_name:
+        log.info(
+            f"Phase A: dropped {skipped_name} preferred/debenture/note entries "
+            f"from {label} list (matched Security Name pattern)."
+        )
     log.info(
         f"Phase A: parsed {len(out)} {label} stock tickers "
         f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, "
-        f"no '$', no -W/-U/-R suffix)."
+        f"no '$', no -W/-U/-R suffix, no preferred/debenture/note name)."
     )
     return out
 
@@ -298,7 +371,8 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
 
     Filters: Market Category="Q" (NASDAQ Global Select only — excludes
     Global Market "G" and Capital Market "S"), Test Issue="N",
-    ETF="N", and no "$" anywhere in the symbol.
+    ETF="N", no "$" anywhere in the symbol, no -W/-U/-R suffix, and
+    no preferred/debenture/note pattern in the Security Name.
     """
     log = get_logger()
     resp = requests.get(NASDAQ_LISTED_URL, headers=_HTTP_HEADERS, timeout=30)
@@ -313,6 +387,7 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
     # Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
     try:
         i_sym = header.index("Symbol")
+        i_name = header.index("Security Name")
         i_mkt = header.index("Market Category")
         i_test = header.index("Test Issue")
         i_etf = header.index("ETF")
@@ -323,7 +398,8 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
     seen: set[str] = set()
     skipped_dollar = 0
     skipped_suffix = 0
-    max_idx = max(i_sym, i_mkt, i_test, i_etf)
+    skipped_name = 0
+    max_idx = max(i_sym, i_name, i_mkt, i_test, i_etf)
     for line in lines[1:]:
         if not line or line.startswith("File Creation Time"):
             continue
@@ -331,6 +407,7 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
         if len(cols) <= max_idx:
             continue
         symbol = cols[i_sym].strip()
+        sec_name = cols[i_name].strip()
         market_cat = cols[i_mkt].strip()
         test = cols[i_test].strip()
         etf = cols[i_etf].strip()
@@ -342,8 +419,7 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
             continue
         if etf != "N":          # exclude ETFs
             continue
-        # Same '$' rule as the other sources: drop if '$' appears
-        # anywhere in the symbol.
+        # Same '$' rule as the other sources.
         if "$" in symbol:
             skipped_dollar += 1
             continue
@@ -351,6 +427,10 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
         # Same warrant/unit/right suffix rule as the otherlisted parsers.
         if _looks_like_non_common_stock(ticker):
             skipped_suffix += 1
+            continue
+        # Same Security-Name filter as the otherlisted parsers.
+        if _looks_like_non_common_stock_by_name(sec_name):
+            skipped_name += 1
             continue
         if ticker in seen:
             continue
@@ -366,34 +446,79 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
             f"Phase A: dropped {skipped_suffix} warrant/unit/right tickers "
             f"from NASDAQ list (suffix -W/-U/-R variants)."
         )
+    if skipped_name:
+        log.info(
+            f"Phase A: dropped {skipped_name} preferred/debenture/note entries "
+            f"from NASDAQ list (matched Security Name pattern)."
+        )
     log.info(
         f"Phase A: parsed {len(out)} NASDAQ Global Select stock tickers "
         f"from NASDAQ Trader (Market Cat=Q, Test=N, ETF=N, no '$', "
-        f"no -W/-U/-R suffix)."
+        f"no -W/-U/-R suffix, no preferred/debenture/note name)."
     )
     return out
 
 
 # ----- yfinance lookup -----------------------------------------------------
 
-def _get_market_cap_and_exchange(ticker: str) -> tuple[Optional[float], Optional[str]]:
-    """Return (market_cap_usd, exchange_code) for `ticker` via
-    yfinance.fast_info (single HTTP round-trip). Returns (None, code) if
-    market cap is missing but exchange is known, or (None, None) on any
-    error."""
-    try:
-        fi = yf.Ticker(ticker).fast_info
-        mc = fi.get("marketCap") if hasattr(fi, "get") else None
-        ex = fi.get("exchange") if hasattr(fi, "get") else None
-        ex_str = str(ex).strip() if ex is not None else None
-        if mc is None:
-            return None, ex_str
-        mc_f = float(mc)
-        if mc_f <= 0:
-            return None, ex_str
-        return mc_f, ex_str
-    except Exception:
-        return None, None
+def _fast_info_once(ticker: str) -> tuple[Optional[float], Optional[str]]:
+    """One yfinance.fast_info round-trip. Returns (marketCap_or_None,
+    exchange_code_or_None). Raises any underlying yfinance exception so
+    the retry loop can react."""
+    fi = yf.Ticker(ticker).fast_info
+    mc = fi.get("marketCap") if hasattr(fi, "get") else None
+    ex = fi.get("exchange") if hasattr(fi, "get") else None
+    ex_str = str(ex).strip() if ex is not None else None
+    if mc is None:
+        return None, ex_str
+    mc_f = float(mc)
+    if mc_f <= 0:
+        return None, ex_str
+    return mc_f, ex_str
+
+
+def _get_market_cap_and_exchange_with_retry(
+    ticker: str,
+    retries: int,
+    retry_delay_s: float,
+) -> tuple[Optional[float], Optional[str], Optional[str]]:
+    """Fetch marketCap + exchange code with bounded retry on exception.
+
+    Returns a triple `(market_cap, exchange_code, error_reason)`:
+      * (mc_float, exch_str, None)  — success, marketCap is valid.
+      * (None,    exch_str, None)   — Yahoo answered cleanly but had no
+                                       marketCap for this ticker (typical
+                                       for preferred shares / bonds /
+                                       ADRs that yfinance does not cover).
+                                       NOT a rate-limit / transient error.
+      * (None,    None,     reason) — every attempt raised an exception.
+                                       `reason` includes the exception
+                                       type+message of the last attempt,
+                                       so the operator can see whether
+                                       Yahoo returned YFRateLimitError,
+                                       JSONDecodeError, HTTPError, etc.
+
+    `retries` is the number of additional attempts after the first try.
+    `retry_delay_s` is the initial sleep between attempts; it doubles
+    between successive retries (exponential backoff).
+    """
+    last_exc: Exception | None = None
+    delay = retry_delay_s
+    total_attempts = max(1, retries + 1)
+    for attempt in range(total_attempts):
+        try:
+            mc, ex = _fast_info_once(ticker)
+            return mc, ex, None
+        except Exception as e:
+            last_exc = e
+            if attempt < total_attempts - 1:
+                time.sleep(delay)
+                delay *= 2.0
+    reason = (
+        f"yfinance error after {total_attempts} attempts: "
+        f"{type(last_exc).__name__}: {last_exc}"
+    )
+    return None, None, reason
 
 
 def _label_for_exchange(code: Optional[str]) -> str:
@@ -454,12 +579,19 @@ def run_phase_a(
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
     test_tickers: list[str] | None = None,
+    marketcap_retries: int = 2,
+    marketcap_retry_delay_s: float = 2.0,
 ) -> list[UniverseEntry]:
     """Execute Phase A end-to-end:
        1. Build the universe = S&P 500 ∪ NYSE-proper ∪ NASDAQ-Global-
           Select ∪ NYSE-American stocks (or use test_tickers).
-       2. Look up market cap + listing exchange for each via yfinance.
+       2. Look up market cap + listing exchange for each via yfinance,
+          with bounded retry on yfinance exceptions.
        3. Keep only tickers with market cap >= min_market_cap_usd.
+
+    `marketcap_retries` is the number of additional attempts after the
+    first yfinance call fails; `marketcap_retry_delay_s` is the initial
+    backoff (it doubles between successive retries).
     """
     log = get_logger()
     log_stage_start(
@@ -472,19 +604,33 @@ def run_phase_a(
     else:
         symbols = fetch_universe()
 
-    def _lookup(sym: Symbol) -> tuple[Symbol, Optional[float], Optional[str]]:
-        mc, ex = _get_market_cap_and_exchange(sym.ticker)
-        return sym, mc, ex
+    def _lookup(sym: Symbol) -> tuple[Symbol, Optional[float], Optional[str], Optional[str]]:
+        mc, ex, err = _get_market_cap_and_exchange_with_retry(
+            sym.ticker,
+            retries=marketcap_retries,
+            retry_delay_s=marketcap_retry_delay_s,
+        )
+        return sym, mc, ex, err
 
     log.info(
         f"Phase A: looking up market cap + exchange for {len(symbols)} tickers "
-        f"(workers={workers}, sleep_ms={fetch_sleep_ms})…"
+        f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
+        f"retries={marketcap_retries}, retry_delay_s={marketcap_retry_delay_s})…"
     )
-    triples = parallel_map(_lookup, symbols, workers=workers, sleep_ms=fetch_sleep_ms)
+    quads = parallel_map(_lookup, symbols, workers=workers, sleep_ms=fetch_sleep_ms)
 
     universe: list[UniverseEntry] = []
-    for sym, mc, ex_code in triples:
+    for sym, mc, ex_code, err in quads:
+        if err is not None:
+            # Exception bubbled up from all retry attempts — surface the
+            # actual yfinance error so the operator sees throttle hits
+            # (YFRateLimitError, JSONDecodeError, HTTPError ...).
+            log_ticker_fail(sym.ticker, err)
+            continue
         if mc is None:
+            # Yahoo answered cleanly with no marketCap. Typical for
+            # preferred shares / bonds / ADRs that yfinance does not
+            # cover. Not a transient error.
             log_ticker_fail(sym.ticker, "market cap unavailable")
             continue
         if mc < min_market_cap_usd:

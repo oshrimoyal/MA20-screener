@@ -18,18 +18,22 @@ runtime:
   # The quote endpoint tolerates higher concurrency than the chart endpoint.
   workers: 10
   fetch_sleep_ms: 100
+  # On a per-ticker yfinance error in Phase A (typical: YFRateLimitError
+  # when Yahoo throttles the quote endpoint), retry up to this many
+  # additional times. The delay doubles between retries (2s, 4s, ...).
+  # Recovers legitimate stocks that briefly hit a rate-limit.
+  marketcap_retries: 2
+  marketcap_retry_delay_s: 2
 
   # ---- Phase B (OHLCV via yfinance history / chart endpoint) ----
   # Yahoo's chart endpoint is rate-limited much more aggressively than the
-  # quote endpoint. Keep these conservative; if you see many "yfinance
-  # error" lines in Phase B, lower history_workers further or raise
-  # history_sleep_ms.
+  # quote endpoint. Keep these conservative; if you still see "yfinance
+  # error" lines, lower history_workers to 1 or raise history_sleep_ms.
   history_workers: 3
   history_sleep_ms: 500
-  # On a per-ticker failure, retry up to this many additional times.
-  # The delay doubles between retries (3s, 6s, 12s, ...).
-  history_retries: 2
-  history_retry_delay_s: 3
+  # The delay doubles between retries (5s, 10s, 20s, ...).
+  history_retries: 3
+  history_retry_delay_s: 5
 
   # ---- Universe / validation ----
   # Minimum market capitalization threshold in USD (Phase A).
