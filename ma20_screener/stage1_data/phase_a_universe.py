@@ -26,11 +26,16 @@ Universe sources:
          Test Issue     == "N"
          ETF            == "N"
 
-  All four sources additionally drop any symbol that contains the
-  "$" character at any position. In NASDAQ Trader / yfinance notation
-  "$" inside a symbol marks a preferred-share series (e.g. "ABR$D",
-  "AGM$E"); these are not common stocks and are out of scope.
-  Removing them at parse time also saves the wasted yfinance
+  All four sources additionally drop two more classes of non-common-
+  stock symbols at parse time:
+    a) Any symbol that contains the "$" character at any position
+       (NASDAQ Trader uses "$" as the preferred-share-series
+       separator, e.g. "ABR$D", "AGM$E").
+    b) Any symbol ending in a warrant / unit / right suffix —
+       "-W", "-WS", "-WT", "-WI", "-WD", "-U", "-UN", "-R", "-RT",
+       "-RW". These are not common stocks and yfinance does not
+       return a market cap for them.
+  Removing these at parse time also saves the wasted yfinance
   round-trips that those symbols would otherwise consume in the
   marketCap lookup.
 
@@ -91,6 +96,26 @@ _EXCH_CODE_TO_LABEL = {
     "PCX": "NYSE",
     "ARCA": "NYSE",
 }
+
+# Suffixes that mark a non-common-stock instrument and must be filtered
+# out at parse time. NASDAQ Trader uses these conventional suffixes for
+# warrants ("-W*"), units ("-U*") and rights ("-R*"). Filtering them
+# here avoids the yfinance round-trip that would otherwise return
+# "market cap unavailable" for each one. Common-stock class suffixes
+# such as "-A" and "-B" (e.g. BRK-B from BRK.B) are intentionally NOT
+# in this list.
+_NON_COMMON_STOCK_SUFFIXES = (
+    "-W", "-WS", "-WT", "-WI", "-WD",     # warrants (various Nasdaq variants)
+    "-U", "-UN",                           # units (typically SPAC units)
+    "-R", "-RT", "-RW",                    # rights
+)
+
+
+def _looks_like_non_common_stock(ticker: str) -> bool:
+    """True if `ticker` ends with a warrant/unit/right suffix from the
+    NASDAQ Trader convention. `ticker` is already in yfinance form
+    (i.e. "." has been replaced with "-")."""
+    return any(ticker.endswith(sfx) for sfx in _NON_COMMON_STOCK_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -191,6 +216,7 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
     out: list[Symbol] = []
     seen: set[str] = set()
     skipped_dollar = 0
+    skipped_suffix = 0
     max_idx = max(i_sym, i_exch, i_etf, i_test)
     for line in lines[1:]:
         if not line or line.startswith("File Creation Time"):
@@ -218,6 +244,13 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
+        # Operator decision: drop tickers ending in warrant / unit /
+        # right suffixes (e.g. ACHR-W, BCSS-U, AIIA-R). These are not
+        # common stocks and yfinance does not return a marketCap for
+        # them — pre-filtering here removes the wasted round-trip.
+        if _looks_like_non_common_stock(ticker):
+            skipped_suffix += 1
+            continue
         if ticker in seen:
             continue
         seen.add(ticker)
@@ -227,9 +260,15 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
             f"{label} list (preferred-share series)."
         )
+    if skipped_suffix:
+        log.info(
+            f"Phase A: dropped {skipped_suffix} warrant/unit/right tickers "
+            f"from {label} list (suffix -W/-U/-R variants)."
+        )
     log.info(
         f"Phase A: parsed {len(out)} {label} stock tickers "
-        f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, no '$')."
+        f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, "
+        f"no '$', no -W/-U/-R suffix)."
     )
     return out
 
@@ -283,6 +322,7 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
     out: list[Symbol] = []
     seen: set[str] = set()
     skipped_dollar = 0
+    skipped_suffix = 0
     max_idx = max(i_sym, i_mkt, i_test, i_etf)
     for line in lines[1:]:
         if not line or line.startswith("File Creation Time"):
@@ -308,6 +348,10 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
+        # Same warrant/unit/right suffix rule as the otherlisted parsers.
+        if _looks_like_non_common_stock(ticker):
+            skipped_suffix += 1
+            continue
         if ticker in seen:
             continue
         seen.add(ticker)
@@ -317,9 +361,15 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
             f"NASDAQ list (preferred-share series)."
         )
+    if skipped_suffix:
+        log.info(
+            f"Phase A: dropped {skipped_suffix} warrant/unit/right tickers "
+            f"from NASDAQ list (suffix -W/-U/-R variants)."
+        )
     log.info(
         f"Phase A: parsed {len(out)} NASDAQ Global Select stock tickers "
-        f"from NASDAQ Trader (Market Cat=Q, Test=N, ETF=N, no '$')."
+        f"from NASDAQ Trader (Market Cat=Q, Test=N, ETF=N, no '$', "
+        f"no -W/-U/-R suffix)."
     )
     return out
 

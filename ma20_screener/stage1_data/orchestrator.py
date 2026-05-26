@@ -20,11 +20,16 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
         test_tickers=cfg.runtime.test_tickers or None,
     )
 
+    # Phase B uses its OWN, more conservative concurrency profile (the
+    # Yahoo chart/history endpoint is rate-limited much harder than the
+    # quote endpoint used by Phase A).
     histories = run_phase_b(
         universe=universe,
         history_trading_days=cfg.runtime.history_trading_days,
-        workers=cfg.runtime.workers,
-        fetch_sleep_ms=cfg.runtime.fetch_sleep_ms,
+        workers=cfg.runtime.history_workers,
+        fetch_sleep_ms=cfg.runtime.history_sleep_ms,
+        retries=cfg.runtime.history_retries,
+        retry_delay_s=cfg.runtime.history_retry_delay_s,
     )
 
     final = run_phase_c(histories)

@@ -1,9 +1,23 @@
 """Phase B: pull OHLCV history for the last 60 closed trading days, with
 strict validation. Any ticker that fails validation is rejected and the
 reason is logged. No imputation is ever performed.
+
+Yahoo's chart/history endpoint (used by `yfinance.Ticker.history`) is
+rate-limited more aggressively than the quote endpoint used by Phase A
+(fast_info). To stay within Yahoo's limits and remain resilient to
+transient errors, Phase B uses:
+  * a dedicated, lower concurrency setting (`history_workers`) and a
+    longer per-call sleep (`history_sleep_ms`);
+  * a bounded retry-with-exponential-backoff around the actual fetch
+    (`history_retries` attempts after the first try, starting at
+    `history_retry_delay_s` seconds and doubling between retries);
+  * explicit logging of the underlying yfinance exception type and
+    message — so when Yahoo throttles, the operator sees `JSONDecodeError`
+    or `HTTPError 429` instead of a generic "no data returned".
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import pandas as pd
@@ -30,21 +44,54 @@ class HistoryEntry:
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
 
 
-def _fetch_history(ticker: str, start, end) -> pd.DataFrame | None:
-    """Return the raw yfinance DataFrame for `ticker` between [start, end),
-    or None on error."""
-    try:
-        df = yf.Ticker(ticker).history(
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            interval="1d",
-            auto_adjust=False,
-            actions=False,
-            timeout=30,
-        )
-        return df
-    except Exception:
-        return None
+def _fetch_history_once(ticker: str, start, end) -> pd.DataFrame:
+    """Single yfinance fetch. Raises on yfinance error so the caller's
+    retry loop can react; returns the raw DataFrame (which may be empty
+    when the symbol genuinely has no data)."""
+    return yf.Ticker(ticker).history(
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        interval="1d",
+        auto_adjust=False,
+        actions=False,
+        timeout=30,
+    )
+
+
+def _fetch_history_with_retry(
+    ticker: str,
+    start,
+    end,
+    retries: int,
+    retry_delay_s: float,
+) -> tuple[pd.DataFrame | None, str | None]:
+    """Fetch OHLCV with bounded retry on exception.
+
+    Returns (DataFrame, None) on success (the DataFrame may still be
+    empty — that is a genuine "no data" answer from Yahoo and not a
+    transient error). Returns (None, reason) when every attempt
+    raises; `reason` includes the exception type and message of the
+    LAST attempt so the operator can see what Yahoo is actually
+    returning (typical patterns: JSONDecodeError when Yahoo serves
+    HTML throttle pages, HTTPError 429 / 401 / 403 when the request
+    is rejected outright).
+    """
+    last_exc: Exception | None = None
+    delay = retry_delay_s
+    total_attempts = max(1, retries + 1)
+    for attempt in range(total_attempts):
+        try:
+            return _fetch_history_once(ticker, start, end), None
+        except Exception as e:
+            last_exc = e
+            if attempt < total_attempts - 1:
+                time.sleep(delay)
+                delay *= 2.0
+    reason = (
+        f"yfinance error after {total_attempts} attempts: "
+        f"{type(last_exc).__name__}: {last_exc}"
+    )
+    return None, reason
 
 
 def _validate_history(
@@ -98,10 +145,17 @@ def run_phase_b(
     history_trading_days: int,
     workers: int,
     fetch_sleep_ms: int,
+    retries: int = 2,
+    retry_delay_s: float = 3.0,
 ) -> list[HistoryEntry]:
     """Fetch OHLCV for every ticker in `universe`. Reject any ticker whose
     data does not cover exactly the last `history_trading_days` closed
-    trading days with no missing values."""
+    trading days with no missing values.
+
+    `retries` is the number of *additional* attempts after the first
+    yfinance call fails; `retry_delay_s` is the initial backoff (it
+    doubles between successive retries).
+    """
     log = get_logger()
     log_stage_start("STAGE 1 — Phase B (OHLCV pull + strict validation)")
 
@@ -111,11 +165,18 @@ def run_phase_b(
     log.info(
         f"Phase B: pulling {history_trading_days} trading days "
         f"({start.strftime('%Y-%m-%d')} → {expected_dates[-1].strftime('%Y-%m-%d')}) "
-        f"for {len(universe)} tickers (workers={workers}, sleep_ms={fetch_sleep_ms})…"
+        f"for {len(universe)} tickers "
+        f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
+        f"retries={retries}, retry_delay_s={retry_delay_s})…"
     )
 
     def _job(u: UniverseEntry) -> HistoryEntry | None:
-        df = _fetch_history(u.ticker, start, end)
+        df, fetch_reason = _fetch_history_with_retry(
+            u.ticker, start, end, retries=retries, retry_delay_s=retry_delay_s
+        )
+        if fetch_reason is not None:
+            log_ticker_fail(u.ticker, fetch_reason)
+            return None
         clean, reason = _validate_history(df, expected_dates)
         if reason is not None:
             log_ticker_fail(u.ticker, reason)

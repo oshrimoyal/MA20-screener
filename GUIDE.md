@@ -68,12 +68,30 @@ paths:
 ### `runtime`
 ```yaml
 runtime:
-  workers: 10              # מספר תהליכים מקבילים — לא לגעת אלא אם יש בעיה
-  fetch_sleep_ms: 100      # השהיה בין קריאות נתונים — לא לגעת בדרך כלל
-  min_market_cap_usd: 1000000000   # סף שווי שוק = 1 מיליארד דולר
-  history_trading_days: 60         # חלון היסטוריה = 60 ימי מסחר
-  test_tickers: ""                 # סריקה חלקית לבדיקה — ראה למטה
+  # שלב Phase A — שליפת שווי שוק (endpoint רגיש פחות)
+  workers: 10
+  fetch_sleep_ms: 100
+
+  # שלב Phase B — שליפת היסטוריית מחירים (endpoint רגיש מאוד)
+  # Yahoo מגביל קצב על endpoint הזה אגרסיבית; אם רואים בלוג הרבה
+  # 'yfinance error' תוריד את history_workers עוד או תעלה את history_sleep_ms
+  history_workers: 3
+  history_sleep_ms: 500
+  history_retries: 2            # מספר ניסיונות נוספים אחרי כשל
+  history_retry_delay_s: 3      # השהיה התחלתית בין נסיונות (מכפילה את עצמה)
+
+  min_market_cap_usd: 1000000000  # סף שווי שוק = 1 מיליארד דולר
+  history_trading_days: 60        # חלון היסטוריה = 60 ימי מסחר
+  test_tickers: ""                # סריקה חלקית לבדיקה — ראה למטה
 ```
+**הערה חשובה על Phase B:** Yahoo Finance מגבילים קצב על endpoint שליפת
+היסטוריה הרבה יותר מאשר על endpoint שווי השוק. ההגדרות שלמעלה (3
+workers, 500ms sleep, 2 retries עם backoff) הן ערכי ברירת מחדל
+שמרניים שאמורים להצליח לרוב הריצות. אם בכל זאת אתה רואה בלוג שורות
+שגיאה רבות מסוג `yfinance error: JSONDecodeError` או דומה, נסה:
+1. להוריד את `history_workers` ל-1.
+2. להעלות את `history_sleep_ms` ל-1000 או 2000.
+3. להגדיל את `history_retries` ל-3.
 **`test_tickers`** מאפשר לבדוק את המערכת על מספר מצומצם של מניות לפני
 ריצה מלאה. לדוגמה:
 ```yaml

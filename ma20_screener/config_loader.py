@@ -22,8 +22,17 @@ class PathsConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    # Phase A (marketCap via yfinance.fast_info — quote endpoint).
     workers: int
     fetch_sleep_ms: int
+    # Phase B (OHLCV via yfinance.Ticker.history — chart endpoint).
+    # Yahoo's chart endpoint rate-limits aggressively, so Phase B uses
+    # lower concurrency and longer sleeps than Phase A by default.
+    history_workers: int
+    history_sleep_ms: int
+    history_retries: int          # attempts AFTER the first try
+    history_retry_delay_s: float  # initial delay, doubles each retry
+    # Universe / validation.
     min_market_cap_usd: float
     history_trading_days: int
     test_tickers: list[str]
@@ -72,6 +81,13 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
     runtime = RuntimeConfig(
         workers=int(_require(rt_raw, "workers", "runtime")),
         fetch_sleep_ms=int(_require(rt_raw, "fetch_sleep_ms", "runtime")),
+        # Phase B settings default to a much more conservative profile
+        # because Yahoo's chart/history endpoint is rate-limited more
+        # aggressively than the quote endpoint used by Phase A.
+        history_workers=int(rt_raw.get("history_workers", 3)),
+        history_sleep_ms=int(rt_raw.get("history_sleep_ms", 500)),
+        history_retries=int(rt_raw.get("history_retries", 2)),
+        history_retry_delay_s=float(rt_raw.get("history_retry_delay_s", 3.0)),
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
         test_tickers=test_tickers,
