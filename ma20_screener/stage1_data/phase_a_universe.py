@@ -1,4 +1,4 @@
-"""Phase A: build the universe from three complementary sources and
+"""Phase A: build the universe from four complementary sources and
 filter by market cap.
 
 Universe sources:
@@ -11,20 +11,22 @@ Universe sources:
      directory:
          ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt
      Filters applied while parsing:
-         Exchange       == "N"   (NYSE proper only — excludes NYSE
-                                  American "A", NYSE Arca "P", Cboe
-                                  BZX "Z" per operator decision)
-         Test Issue     == "N"   (drop test issues)
-         ETF            == "N"   (operator asked for stocks only)
+         Exchange       == "N"   (NYSE proper)
+         Test Issue     == "N"
+         ETF            == "N"
   3. NASDAQ Global Select Market common stocks, from NASDAQ Trader's
          ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt
      Filters applied while parsing:
-         Market Cat.    == "Q"   (NASDAQ Global Select only — excludes
-                                  Global Market "G" and Capital Market
-                                  "S" per operator decision)
+         Market Cat.    == "Q"   (NASDAQ Global Select)
          Test Issue     == "N"
          ETF            == "N"
-  All three sources additionally drop any symbol that contains "$"
+  4. NYSE American common stocks (formerly AMEX), from the same
+     otherlisted.txt file:
+         Exchange       == "A"   (NYSE American)
+         Test Issue     == "N"
+         ETF            == "N"
+
+  All four sources additionally drop any symbol that contains "$"
   from position 2 onwards (an internal "$"). In NASDAQ Trader /
   yfinance notation an internal "$" marks a preferred-share series
   (e.g. "ABR$D", "AGM$E"); these are not common stocks and are out
@@ -34,14 +36,16 @@ Universe sources:
   that those symbols would otherwise consume in the marketCap
   lookup.
 
-  The three lists are merged and deduplicated by ticker; an entry
+  The four lists are merged and deduplicated by ticker; an entry
   that appears in more than one source is included exactly once.
 
-Why these three together?
-  The S&P 500 anchors the large-cap names. NYSE-proper (otherlisted)
-  adds every other NYSE-listed common stock. NASDAQ Global Select
-  (nasdaqlisted with Market Category = Q) adds every NASDAQ-listed
-  common stock in the top NASDAQ tier that is not in the S&P 500.
+Why these four together?
+  The S&P 500 anchors the large-cap names. NYSE-proper (otherlisted
+  Exchange=N) adds every other NYSE-listed common stock. NASDAQ
+  Global Select (nasdaqlisted Market Category=Q) adds every NASDAQ
+  large-tier common stock that is not in the S&P 500. NYSE American
+  (otherlisted Exchange=A) adds the historically AMEX-listed names
+  that pass the $1B market-cap filter.
 
 After the universe is collected, the market cap AND the listing
 exchange of every ticker are read from yfinance.fast_info in a single
@@ -164,19 +168,17 @@ def fetch_sp500_tickers() -> list[Symbol]:
     return symbols
 
 
-# ----- Source 2: NYSE-proper stocks from NASDAQ Trader ---------------------
+# ----- Sources 2 & 4: NYSE-proper + NYSE American from NASDAQ Trader -------
 
-def fetch_nyse_stocks() -> list[Symbol]:
-    """Download NYSE-proper common stocks from NASDAQ Trader's
-    otherlisted.txt. Returns yfinance-style tickers.
+def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol]:
+    """Internal helper: parse otherlisted.txt for one specific Exchange
+    code and apply the standard filters.
 
-    Filters: Exchange="N" (NYSE proper), Test Issue="N", ETF="N".
+    Filters: Exchange == `exchange_code`, Test Issue == "N", ETF == "N",
+    no internal "$" in the symbol (leading "$" is preserved).
+    `label` is used only for log lines (e.g. "NYSE-proper", "NYSE American").
     """
     log = get_logger()
-    resp = requests.get(OTHER_LISTED_URL, headers=_HTTP_HEADERS, timeout=30)
-    resp.raise_for_status()
-    text = resp.text
-
     lines = text.splitlines()
     if not lines:
         raise RuntimeError("otherlisted.txt is empty.")
@@ -209,19 +211,15 @@ def fetch_nyse_stocks() -> list[Symbol]:
             continue
         if test != "N":
             continue
-        if exchange != "N":   # strict NYSE proper only
+        if exchange != exchange_code:
             continue
         if etf != "N":        # exclude ETFs
             continue
         # Operator decision: drop any ticker that contains "$" from
         # position 2 onwards. NASDAQ Trader uses "$" as the
-        # preferred-series separator (e.g. "ABR$D", "AGM$E") — these
-        # are preferred shares, not common stock, and out of scope
-        # for this screener. A leading "$" (not used by any current
-        # ticker but allowed by this rule) is preserved. Removing
-        # internal-"$" symbols here saves ~475 wasted yfinance
-        # round-trips per run observed previously and keeps the log
-        # clean.
+        # preferred-series separator (e.g. "ABR$D", "AGM$E"). A
+        # leading "$" is preserved (allowed by the rule though no
+        # ticker currently uses one).
         if "$" in symbol[1:]:
             skipped_dollar += 1
             continue
@@ -233,13 +231,30 @@ def fetch_nyse_stocks() -> list[Symbol]:
     if skipped_dollar:
         log.info(
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
-            f"NYSE list (preferred-share series)."
+            f"{label} list (preferred-share series)."
         )
     log.info(
-        f"Phase A: parsed {len(out)} NYSE-proper stock tickers "
-        f"from NASDAQ Trader (Exchange=N, Test=N, ETF=N, no '$')."
+        f"Phase A: parsed {len(out)} {label} stock tickers "
+        f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, no internal '$')."
     )
     return out
+
+
+def _fetch_otherlisted_text() -> str:
+    """Download otherlisted.txt and return the raw text."""
+    resp = requests.get(OTHER_LISTED_URL, headers=_HTTP_HEADERS, timeout=30)
+    resp.raise_for_status()
+    return resp.text
+
+
+def fetch_nyse_stocks() -> list[Symbol]:
+    """NYSE proper (Exchange='N') common stocks."""
+    return _parse_otherlisted(_fetch_otherlisted_text(), "N", "NYSE-proper")
+
+
+def fetch_nyse_american_stocks() -> list[Symbol]:
+    """NYSE American (Exchange='A', formerly AMEX) common stocks."""
+    return _parse_otherlisted(_fetch_otherlisted_text(), "A", "NYSE American")
 
 
 # ----- Source 3: NASDAQ Global Select stocks from NASDAQ Trader ------------
@@ -348,33 +363,42 @@ def _label_for_exchange(code: Optional[str]) -> str:
 # ----- Phase A entry point -------------------------------------------------
 
 def fetch_universe() -> list[Symbol]:
-    """Fetch S&P 500 + NYSE-proper universe, merged and deduplicated.
-    Raises on any source failure (so the operator sees the problem
-    rather than running on a partial universe)."""
+    """Fetch S&P 500 + NYSE-proper + NASDAQ-Global-Select + NYSE
+    American universe, merged and deduplicated. Raises on any source
+    failure (so the operator sees the problem rather than running on
+    a partial universe).
+
+    otherlisted.txt is downloaded once and parsed twice (once for
+    Exchange=N and once for Exchange=A) to avoid a redundant HTTP
+    round-trip.
+    """
     log = get_logger()
     sp500 = fetch_sp500_tickers()
-    nyse = fetch_nyse_stocks()
+    otherlisted_text = _fetch_otherlisted_text()
+    nyse = _parse_otherlisted(otherlisted_text, "N", "NYSE-proper")
     nasdaq_q = fetch_nasdaq_q_stocks()
+    nyse_american = _parse_otherlisted(otherlisted_text, "A", "NYSE American")
+
     merged: dict[str, Symbol] = {}
     for s in sp500:
         merged.setdefault(s.ticker, s)
-    nyse_overlap = 0
+    nyse_overlap = sum(1 for s in nyse if s.ticker in merged)
     for s in nyse:
-        if s.ticker in merged:
-            nyse_overlap += 1
-        else:
-            merged[s.ticker] = s
-    nasdaq_overlap = 0
+        merged.setdefault(s.ticker, s)
+    nasdaq_overlap = sum(1 for s in nasdaq_q if s.ticker in merged)
     for s in nasdaq_q:
-        if s.ticker in merged:
-            nasdaq_overlap += 1
-        else:
-            merged[s.ticker] = s
+        merged.setdefault(s.ticker, s)
+    amex_overlap = sum(1 for s in nyse_american if s.ticker in merged)
+    for s in nyse_american:
+        merged.setdefault(s.ticker, s)
+
     out = list(merged.values())
     log.info(
         f"Phase A: merged universe — S&P 500 ({len(sp500)}) + NYSE ({len(nyse)}) "
-        f"+ NASDAQ-Q ({len(nasdaq_q)}); NYSE overlap with S&P 500={nyse_overlap}; "
+        f"+ NASDAQ-Q ({len(nasdaq_q)}) + NYSE-American ({len(nyse_american)}); "
+        f"NYSE overlap with S&P 500={nyse_overlap}; "
         f"NASDAQ-Q overlap with (S&P 500 ∪ NYSE)={nasdaq_overlap}; "
+        f"NYSE-American overlap with (S&P 500 ∪ NYSE ∪ NASDAQ-Q)={amex_overlap}; "
         f"final unique tickers = {len(out)}."
     )
     return out
@@ -387,13 +411,15 @@ def run_phase_a(
     test_tickers: list[str] | None = None,
 ) -> list[UniverseEntry]:
     """Execute Phase A end-to-end:
-       1. Build the universe = S&P 500 ∪ NYSE-proper ∪ NASDAQ-Global-Select
-          stocks (or use test_tickers).
+       1. Build the universe = S&P 500 ∪ NYSE-proper ∪ NASDAQ-Global-
+          Select ∪ NYSE-American stocks (or use test_tickers).
        2. Look up market cap + listing exchange for each via yfinance.
        3. Keep only tickers with market cap >= min_market_cap_usd.
     """
     log = get_logger()
-    log_stage_start("STAGE 1 — Phase A (S&P 500 + NYSE + NASDAQ-Q + market cap filter)")
+    log_stage_start(
+        "STAGE 1 — Phase A (S&P 500 + NYSE + NASDAQ-Q + NYSE-American + market cap filter)"
+    )
 
     if test_tickers:
         log.info(f"Phase A: using TEST ticker override: {test_tickers}")
