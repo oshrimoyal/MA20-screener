@@ -36,7 +36,10 @@ def main() -> int:
     log.info(f"MA20 Screener — run starting {datetime.now().isoformat(timespec='seconds')}")
     log.info(f"Log file: {log_path}")
     log.info(
-        f"Config: workers={cfg.runtime.workers} sleep_ms={cfg.runtime.fetch_sleep_ms} "
+        f"Config: history_workers={cfg.runtime.history_workers} "
+        f"history_sleep_ms={cfg.runtime.history_sleep_ms} "
+        f"history_retries={cfg.runtime.history_retries} "
+        f"history_retry_delay_s={cfg.runtime.history_retry_delay_s} "
         f"min_mcap=${cfg.runtime.min_market_cap_usd:,.0f} "
         f"history_days={cfg.runtime.history_trading_days} "
         f"test_tickers={cfg.runtime.test_tickers or '(none)'}"
