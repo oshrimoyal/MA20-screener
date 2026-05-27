@@ -13,15 +13,17 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
     log = get_logger()
     log_stage_start("STAGE 1")
 
-    # Phase A: build the universe and enrich with the SEC EDGAR
-    # exchange label. The marketCap filter lives in Phase B.
+    # Phase A: build the universe via FMP /stable/company-screener
+    # (NASDAQ + NYSE common stocks >= $1B). The screener response
+    # also includes marketCap, which is forwarded to Phase B via the
+    # UniverseEntry — so Phase B does not need a separate /stable/quote
+    # call per ticker.
     universe = run_phase_a(
-        sec_user_agent=cfg.runtime.sec_user_agent,
+        fmp_api_key=cfg.runtime.fmp_api_key,
         test_tickers=cfg.runtime.test_tickers or None,
     )
 
-    # Phase B: per-ticker OHLCV + marketCap from FMP (batched), then
-    # the >=$1B filter.
+    # Phase B: per-ticker OHLCV from FMP /stable/historical-price-eod/full.
     histories = run_phase_b(
         universe=universe,
         history_trading_days=cfg.runtime.history_trading_days,

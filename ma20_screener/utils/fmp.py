@@ -3,24 +3,32 @@
 FMP retired the legacy `/api/v3/...` endpoints for users who joined
 after 31 Aug 2025; all new subscribers must use the `/stable/...`
 namespace. Empirically (verified against the operator's live Starter
-key), the `/stable` endpoints accept ONE symbol per call. Multi-symbol
-comma-separated input on `/stable/historical-price-eod/full` is
-silently dropped (returns `[]`); `/stable/batch-quote` is a Premium-tier
-endpoint not included in Starter. So this wrapper exposes two
-single-symbol functions and lets Phase B iterate at the Starter rate
-limit (300 calls/min).
+key):
 
-Endpoints:
+  * /stable/historical-price-eod/full accepts ONE symbol per call.
+    Multi-symbol comma-separated input is silently dropped (returns
+    `[]`).
+  * /stable/batch-quote is Premium-tier (HTTP 402 on Starter).
+  * /stable/quote works for a single symbol.
+  * /stable/company-screener works on Starter and supports filtering
+    by exchange, marketCap, isEtf, isFund, isActivelyTrading, country,
+    etc. ONE call returns up to `limit` matching companies with
+    `marketCap` and `exchangeShortName` already attached — so Phase A
+    can build the universe and skip a separate quote pass.
+
+Endpoints exposed:
+  * /stable/company-screener?exchange=NASDAQ&marketCapMoreThan=&...
+        Universe builder used by Phase A. Returns array of company
+        dicts with at least {symbol, exchangeShortName, marketCap,
+        isEtf, isFund, isActivelyTrading}.
+
   * /stable/historical-price-eod/full?symbol=AAPL&from=&to=
-        Daily OHLCV. Returns a flat array of row dicts: one per
-        trading day, each with {symbol, date, open, high, low, close,
-        volume, ...}. Empty array if Starter does not include the
-        symbol or the date range has no data.
+        Daily OHLCV. Returns a flat array of row dicts (one per
+        trading day).
 
   * /stable/quote?symbol=AAPL
-        Real-time quote. Returns an array of length 1 (or 0 if the
-        symbol is unknown), where the single element carries
-        marketCap (USD, not millions), price, exchange, etc.
+        Real-time quote with marketCap (in USD, not millions). Used
+        only on the test-mode path (one call per test ticker).
 
 Auth via the `apikey` query parameter. Ticker normalisation: internal
 form uses '-' for class shares (BRK-B); FMP uses '.' (BRK.B). The
@@ -28,9 +36,12 @@ wrapper converts at the URL boundary.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import pandas as pd
 import requests
 
+SCREENER_URL = "https://financialmodelingprep.com/stable/company-screener"
 HISTORICAL_URL = (
     "https://financialmodelingprep.com/stable/historical-price-eod/full"
 )
@@ -76,6 +87,59 @@ def _normalise_historical_rows(rows: list[dict], ticker: str) -> pd.DataFrame:
             f"FMP historical for {ticker!r} missing columns: {missing}"
         )
     return df[OHLCV_COLS].astype(float).sort_index()
+
+
+def fetch_company_screener(
+    api_key: str,
+    exchange: Optional[str] = None,
+    market_cap_more_than: Optional[float] = None,
+    is_etf: Optional[bool] = None,
+    is_fund: Optional[bool] = None,
+    is_actively_trading: Optional[bool] = None,
+    country: Optional[str] = None,
+    limit: int = 10000,
+    timeout: int = 30,
+) -> list[dict]:
+    """Call /stable/company-screener with the supplied filters and
+    return the parsed JSON array.
+
+    Each row contains at least: symbol, companyName, marketCap,
+    exchange, exchangeShortName, isEtf, isFund, isActivelyTrading.
+    Phase A uses `exchangeShortName` and `marketCap` directly.
+
+    Raises:
+      * FMPRateLimited — HTTP 429.
+      * FMPNotFound    — payload is not a JSON array (unexpected shape).
+      * requests.HTTPError — any other non-2xx response.
+    """
+    if not api_key:
+        raise ValueError("api_key must be non-empty")
+
+    params: dict[str, str] = {"apikey": api_key, "limit": str(int(limit))}
+    if exchange is not None:
+        params["exchange"] = str(exchange)
+    if market_cap_more_than is not None:
+        params["marketCapMoreThan"] = str(int(market_cap_more_than))
+    if is_etf is not None:
+        params["isEtf"] = "true" if is_etf else "false"
+    if is_fund is not None:
+        params["isFund"] = "true" if is_fund else "false"
+    if is_actively_trading is not None:
+        params["isActivelyTrading"] = "true" if is_actively_trading else "false"
+    if country is not None:
+        params["country"] = str(country)
+
+    resp = requests.get(SCREENER_URL, params=params, timeout=timeout)
+    if resp.status_code == 429:
+        raise FMPRateLimited("FMP rate-limited /company-screener")
+    resp.raise_for_status()
+    payload = resp.json()
+    if not isinstance(payload, list):
+        raise FMPNotFound(
+            f"FMP /company-screener returned unexpected type "
+            f"{type(payload).__name__}"
+        )
+    return payload
 
 
 def fetch_historical_prices(

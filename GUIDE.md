@@ -6,13 +6,14 @@
 
 ## מה המערכת עושה?
 
-המערכת סורקת **את מניות מדד S&P 500 בלבד** (~503 מניות), ובכל ריצה
-מבצעת ארבעה שלבים:
+המערכת סורקת **את מניות NYSE + NASDAQ עם שווי שוק ≥ $1B**
+(~1,900 מניות), ובכל ריצה מבצעת ארבעה שלבים:
 
-1. **שלב 1 — תשתית נתונים:** משיגה את רשימת מניות ה-S&P 500 מ-Wikipedia,
-   מורידה נתוני מסחר יומיים של 60 ימי מסחר אחרונים ושווי שוק מ-FMP,
-   מסננת מניות עם שווי שוק מתחת למיליארד דולר, ומחשבת אינדיקטורים
-   (SMA20, ATR%, CCI14, גאפים פתוחים).
+1. **שלב 1 — תשתית נתונים:** מבקשת מ-FMP screener את כל המניות
+   ב-NYSE ו-NASDAQ ששווי השוק שלהן ≥ $1B (לא ETFs, לא Mutual Funds,
+   actively trading, US בלבד), מורידה נתוני מסחר יומיים של 60 ימי
+   מסחר אחרונים, ומחשבת אינדיקטורים (SMA20, ATR%, CCI14, גאפים
+   פתוחים).
 2. **שלב 2 — בדיקות גולמיות:** מריצה על כל מניה 6 בדיקות (מגמה
    חודשית/שבועית, נר אחרון וצורות, ווליום, מיקום מול ה-SMA20, גאפים מול
    המחיר, מצב CCI).
@@ -69,12 +70,7 @@ paths:
 ### `runtime`
 ```yaml
 runtime:
-  # SEC EDGAR — Phase A (תוויות בורסה NYSE/NASDAQ).
-  # SEC דורש אימייל אמיתי בכותרת User-Agent (מדיניות "fair access").
-  # החלף את הדוגמה ב-email האמיתי שלך.
-  sec_user_agent: "MA20-Screener your-email@example.com"
-
-  # FMP — Phase B (OHLCV + שווי שוק).
+  # FMP — Phase A (universe via company-screener) + Phase B (OHLCV).
   # דורש את חבילת FMP Starter (או יותר). הירשם ב-
   # https://site.financialmodelingprep.com/pricing-plans, רכוש Starter,
   # והעתק את ה-API key מה-dashboard לשורה הבאה.
@@ -92,47 +88,46 @@ runtime:
   test_tickers: ""                # סריקה חלקית לבדיקה — ראה למטה
 ```
 
-**מקורות הנתונים:** המערכת משתמשת בשני מקורות:
+**מקורות הנתונים:** המערכת משתמשת אך ורק ב-FMP (Starter ומעלה):
 
-1. **Wikipedia + SEC EDGAR** — רשימת מניות ה-S&P 500 ותוויות בורסה
-   (NYSE/NASDAQ) לכל טיקר. ללא API key, ללא תשלום.
-2. **FMP (Financial Modeling Prep) Starter** — שני endpoints,
-   single-symbol בלבד (FMP free tier אינו מספק batch ל-users שנרשמו
-   אחרי 31 באוגוסט 2025):
-   * `/stable/historical-price-eod/full?symbol=X` — OHLCV יומי לטיקר
-     בודד.
-   * `/stable/quote?symbol=X` — שווי שוק (`marketCap`) לטיקר בודד.
+1. **Phase A — `/stable/company-screener`**: שתי קריאות (NASDAQ + NYSE).
+   כל קריאה מחזירה את כל המניות בבורסה הספציפית עם
+   `marketCap ≥ $1B`, `isEtf=false`, `isFund=false`,
+   `isActivelyTrading=true`, `country=US`. ה-response כולל את
+   `marketCap` ו-`exchangeShortName` ישירות.
 
-   דורש מנוי FMP Starter (~$19/חודש ב-billing שנתי). Starter = 300
-   קריאות/דקה ללא תקרת יום. כל טיקר צורך 2 קריאות, כך שריצה מלאה של
-   S&P 500 (~503 טיקרים) = ~1,006 קריאות = **~3-4 דקות**.
+2. **Phase B — `/stable/historical-price-eod/full?symbol=X`**:
+   קריאה אחת לכל טיקר (~1,900 קריאות לריצה מלאה של NASDAQ + NYSE).
+   מחזיר OHLCV יומי.
 
-**חישוב שווי שוק:** `שווי שוק = quote.marketCap של FMP` (כבר ב-USD,
-ללא צורך בכפל).
+Starter = 300 קריאות/דקה, ללא תקרת יום. ריצה מלאה ~1,902 קריאות =
+**~8 דקות** עם הקונפיג הסטנדרטי.
+
+**חישוב שווי שוק:** `שווי שוק = marketCap` מתוך תשובת ה-screener
+(כבר ב-USD; ה-screener כבר סינן ≥ $1B server-side).
 
 **חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי. אם
 טיקר חסר ב-FMP — מסומן כ-"לא נמצא" (לא retry). שגיאה 429 (rate limit)
 מקבלת backoff נפרד (10s, 20s, 40s). שורות שגיאה בלוג:
 * `fmp historical: FMP returned no historical rows for ...` — FMP לא
   מכיר את הטיקר או שאין נתונים בחלון 60 הימים.
-* `fmp quote: FMP /quote returned empty payload for ...` — FMP לא
-  מכיר את הטיקר.
-* `fmp quote: FMP /quote has no positive marketCap for ...` — FMP
-  מכיר את הטיקר אבל לא מפרסם שווי שוק (נדיר).
 * `fmp historical rate-limited after N attempts: ...` — חרגנו מ-300
-  קריאות/דקה. אם זה קורה הרבה, העלה את `history_sleep_ms` ל-300-500.
+  קריאות/דקה. אם זה קורה הרבה, העלה את `history_sleep_ms` או הורד
+  את `history_workers`.
 * `fmp historical error after N attempts: HTTPError: ...` — שגיאת
   רשת אחרת אחרי כל הניסיונות.
 * `missing/NaN OHLCV (first missing date ...)` — FMP החזיר נתונים אבל
   חסרים ימים בתוך החלון.
-* `market cap $... below $1,000,000,000` — דחייה לגיטימית של small-cap.
+* `market cap $... below $1,000,000,000` — דחייה הגנתית של ticker
+  שעבר את ה-screener אך marketCap ירד בין לבין (נדיר; קורה אם הריצה
+  ב-test mode שמדלגת על ה-screener).
 
 **`test_tickers`** מאפשר לבדוק את המערכת על מספר מצומצם של מניות לפני
 ריצה מלאה. לדוגמה:
 ```yaml
   test_tickers: "AAPL,MSFT,NVDA,BRK-B"
 ```
-כדי להפעיל סריקה על **כל מניות ה-S&P 500**, השאר את הערך ריק:
+כדי להפעיל סריקה על **כל מניות NYSE + NASDAQ עם $1B+**, השאר את הערך ריק:
 ```yaml
   test_tickers: ""
 ```
@@ -148,10 +143,10 @@ python main.py
 ```
 
 זהו. הריצה תארך:
-- עם `test_tickers` של 5-10 מניות: ~10 שניות (Phase A + 10-20 קריאות
-  FMP).
-- ריצה מלאה (~503 מניות S&P 500): **~3-4 דקות** — מותחם ע"י ה-300
-  קריאות/דקה של FMP Starter (~1,006 קריאות סה"כ).
+- עם `test_tickers` של 5-10 מניות: ~15-20 שניות (Phase A: 1 quote
+  call לכל test-ticker; Phase B: 1 historical call לכל test-ticker).
+- ריצה מלאה (~1,900 מניות NYSE+NASDAQ $1B+): **~8 דקות** עם
+  `workers=1, sleep_ms=250`. מהיר יותר עם `workers=4`.
 
 במהלך הריצה תראה במסך התקדמות שלב אחר שלב, כולל מספר מניות שעברו /
 נדחו בכל שלב. בסיום תיווצר קובץ CSV חדש בתיקיית `output/` ויישלחו

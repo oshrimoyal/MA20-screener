@@ -1,19 +1,17 @@
-"""Phase B: fetch 60-day OHLCV and market capitalization from Financial
-Modeling Prep (Starter tier) and apply the >=$1B filter.
+"""Phase B: fetch 60-day OHLCV from Financial Modeling Prep
+(Starter tier). Market cap is already attached to each UniverseEntry
+by Phase A (from the FMP company-screener response), so Phase B
+makes ONE FMP call per ticker instead of two.
 
-Two single-symbol FMP /stable endpoints are used per ticker:
+Endpoint: /stable/historical-price-eod/full?symbol=X&from=&to=
 
-  * /stable/historical-price-eod/full?symbol=X&from=&to=  → OHLCV.
-  * /stable/quote?symbol=X                               → marketCap.
-
-Starter tier limits: 300 calls/minute, no daily cap. Two calls per
-ticker × ~503 S&P 500 tickers = ~1,006 calls = ~3.5 min at full
-throughput. The parallel_map config (workers + sleep_ms) paces the
-loop just under the 300/min ceiling.
+Starter tier limits: 300 calls/minute, no daily cap. One call per
+ticker × ~1,900 NASDAQ+NYSE tickers = ~1,900 calls. The parallel_map
+config (workers + sleep_ms) paces the loop under the 300/min
+ceiling.
 
 `FMPNotFound` is permanent (no retry). `FMPRateLimited` (HTTP 429)
-retries with the same exponential backoff used for generic transient
-errors.
+retries with a separate longer backoff.
 """
 from __future__ import annotations
 
@@ -158,7 +156,7 @@ def run_phase_b(
     the standard config (`workers=1`, `sleep_ms=250` → ~4 calls/sec).
     """
     log = get_logger()
-    log_stage_start("STAGE 1 — Phase B (FMP OHLCV + marketCap filter)")
+    log_stage_start("STAGE 1 — Phase B (FMP OHLCV)")
 
     expected_dates = get_last_n_closed_trading_days(history_trading_days)
     pad = pd.Timedelta(days=_HISTORICAL_WINDOW_PAD_DAYS)
@@ -175,7 +173,9 @@ def run_phase_b(
     )
 
     def _job(u: UniverseEntry) -> Optional[HistoryEntry]:
-        # 1. Historical OHLCV.
+        # Historical OHLCV (the only FMP call we need per ticker —
+        # marketCap was already attached in Phase A by the screener
+        # for normal runs, or by the test-mode quote pass).
         df, hist_reason = _fetch_with_retry(
             fmp.fetch_historical_prices,
             u.ticker,
@@ -192,31 +192,20 @@ def run_phase_b(
             log_ticker_fail(u.ticker, val_reason)
             return None
 
-        # 2. Quote (marketCap in USD).
-        quote, quote_reason = _fetch_with_retry(
-            fmp.fetch_quote,
-            u.ticker,
-            fmp_api_key,
-            retries=retries,
-            retry_delay_s=retry_delay_s,
-            label="fmp quote",
-        )
-        if quote_reason is not None:
-            log_ticker_fail(u.ticker, quote_reason)
-            return None
-
-        market_cap = float(quote.get("marketCap") or 0.0)
-        if market_cap < min_market_cap_usd:
+        # Defensive: Phase A's screener applied the floor server-side,
+        # but enforce it again here so test-mode tickers (which bypass
+        # the screener) still get filtered.
+        if u.market_cap < min_market_cap_usd:
             log_ticker_fail(
                 u.ticker,
-                f"market cap ${market_cap:,.0f} below ${min_market_cap_usd:,.0f}",
+                f"market cap ${u.market_cap:,.0f} below ${min_market_cap_usd:,.0f}",
             )
             return None
 
         return HistoryEntry(
             ticker=u.ticker,
             exchange=u.exchange,
-            market_cap=market_cap,
+            market_cap=u.market_cap,
             ohlcv=clean,
         )
 

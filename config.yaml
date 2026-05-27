@@ -14,19 +14,13 @@ paths:
   log_dir: "./logs"
 
 runtime:
-  # ---- SEC EDGAR (Phase A exchange labels) ----
-  # SEC's fair-access policy requires every request to include a real
-  # contact email in the User-Agent header. Replace this with your own
-  # email; SEC will return 403 if you keep a generic value.
-  sec_user_agent: "MA20-Screener replace-me@example.com"
-
-  # ---- FMP (Phase B OHLCV + marketCap) ----
-  # Requires the FMP Starter plan (or higher) — Basic free is too
-  # constrained for the S&P 500 universe. Register and subscribe at
-  # https://site.financialmodelingprep.com/pricing-plans, then paste
-  # the API key from your dashboard below. Starter = 300 calls/min,
-  # no daily cap. Each ticker uses two calls (historical + quote), so
-  # a full S&P 500 run is ~1,006 calls = ~3-4 minutes.
+  # ---- FMP (universe + Phase B OHLCV) ----
+  # Requires the FMP Starter plan (or higher). Register and subscribe
+  # at https://site.financialmodelingprep.com/pricing-plans, then
+  # paste the API key from your dashboard below. Starter = 300
+  # calls/min, no daily cap. Phase A makes 2 screener calls (NASDAQ +
+  # NYSE) and Phase B makes 1 historical call per ticker — typically
+  # ~1,900 calls per run for the NASDAQ+NYSE >= $1B universe.
   fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
   # ---- Phase B concurrency profile ----

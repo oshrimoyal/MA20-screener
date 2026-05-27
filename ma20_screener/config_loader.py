@@ -23,10 +23,10 @@ class PathsConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     # Phase B (FMP Starter tier) concurrency profile. Starter is 300
-    # calls/minute with no daily cap. Two calls per ticker (historical
-    # + quote) × ~503 S&P 500 tickers = ~1,006 calls per run. The
-    # defaults below (workers=1, sleep_ms=250) yield ~4 calls/sec
-    # = ~240/min, safely under the 300/min ceiling.
+    # calls/minute with no daily cap. Phase A makes 2 screener calls;
+    # Phase B makes 1 historical call per ticker × ~1,900 NASDAQ+NYSE
+    # tickers = ~1,900 calls. The defaults yield ~4 calls/sec
+    # (~240/min), safely under the 300/min ceiling.
     history_workers: int
     history_sleep_ms: int
     history_retries: int          # attempts AFTER the first try
@@ -36,16 +36,8 @@ class RuntimeConfig:
     min_market_cap_usd: float
     history_trading_days: int
     test_tickers: list[str]
-    # SEC EDGAR fair-access policy: every request MUST include a real
-    # contact email in the User-Agent header. Phase A uses SEC's
-    # company_tickers_exchange.json for the authoritative exchange
-    # label of each S&P 500 ticker.
-    sec_user_agent: str
-    # FMP API key (Starter tier or higher — Basic free tier does NOT
-    # work because /stable/historical-price-eod/full silently returns
-    # [] for multi-symbol input and /stable/quote single-symbol is
-    # available, but the call budget of 250/day cannot cover 1,006
-    # calls per run). Validated by `load_config`.
+    # FMP API key (Starter tier or higher — Basic free tier is too
+    # constrained at this universe size). Validated by `load_config`.
     fmp_api_key: str
 
 
@@ -92,14 +84,6 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
     test_tickers_raw = rt_raw.get("test_tickers", "") or ""
     test_tickers = [t.strip().upper() for t in str(test_tickers_raw).split(",") if t.strip()]
 
-    sec_user_agent = str(_require(rt_raw, "sec_user_agent", "runtime")).strip()
-    if "@" not in sec_user_agent:
-        raise ValueError(
-            "runtime.sec_user_agent must include a real contact email "
-            "per SEC's fair-access policy. Example: "
-            "'MA20-Screener you@example.com'."
-        )
-
     fmp_api_key = str(_require(rt_raw, "fmp_api_key", "runtime")).strip()
     if not fmp_api_key or fmp_api_key == _FMP_API_KEY_PLACEHOLDER:
         raise ValueError(
@@ -122,7 +106,6 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
         test_tickers=test_tickers,
-        sec_user_agent=sec_user_agent,
         fmp_api_key=fmp_api_key,
     )
 
