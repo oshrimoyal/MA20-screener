@@ -14,28 +14,32 @@ paths:
   log_dir: "./logs"
 
 runtime:
-  # ---- Phase A (marketCap via yfinance fast_info / quote endpoint) ----
-  # The quote endpoint tolerates higher concurrency than the chart endpoint.
-  # No retry here: under broad Yahoo rate-limiting, retry only multiplies
-  # the runtime without recovering tickers. yfinance exceptions are still
-  # surfaced in the per-ticker log line for visibility.
-  workers: 10
-  fetch_sleep_ms: 100
+  # ---- SEC EDGAR ----
+  # SEC's fair-access policy requires every request to include a real
+  # contact email in the User-Agent header. Replace this with your own
+  # email; SEC will return 403 if you keep a generic value.
+  sec_user_agent: "MA20-Screener replace-me@example.com"
+  # Stooq does not require contact info; a polite UA is good practice.
+  # Defaults to sec_user_agent if omitted.
+  stooq_user_agent: "MA20-Screener replace-me@example.com"
 
-  # ---- Phase B (OHLCV via yfinance history / chart endpoint) ----
-  # Yahoo's chart endpoint is rate-limited much more aggressively than the
-  # quote endpoint. Keep these conservative; if you still see "yfinance
-  # error" lines, lower history_workers to 1 or raise history_sleep_ms.
+  # ---- Phase B (OHLCV from Stooq) ----
+  # Stooq does not publish a rate limit; empirically ~2 req/sec is fine.
+  # If you ever see "stooq error after N attempts" in the log, lower
+  # history_workers to 1 or raise history_sleep_ms.
   history_workers: 3
   history_sleep_ms: 500
-  # The delay doubles between retries (5s, 10s, 20s, ...).
+  # Retry on transient Stooq errors. Delay doubles each retry (5s, 10s, 20s).
+  # `StooqNotFound` (Stooq has no data for this ticker) is treated as a
+  # permanent answer and is NOT retried.
   history_retries: 3
   history_retry_delay_s: 5
 
   # ---- Universe / validation ----
-  # Minimum market capitalization threshold in USD (Phase A).
+  # Minimum market capitalization threshold in USD. Computed in Phase B
+  # as: latest Stooq close × SEC EDGAR shares outstanding.
   min_market_cap_usd: 1000000000
-  # Number of trading days of OHLCV history required (Phase B).
+  # Number of trading days of OHLCV history required.
   history_trading_days: 60
   # Optional: limit Phase A to this comma-separated list of tickers (testing).
   # Leave empty for a full universe scan.

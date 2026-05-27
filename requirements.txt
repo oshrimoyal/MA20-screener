@@ -1,6 +1,5 @@
 # MA20 Screener — Python dependencies
 # Stage 1: data infrastructure
-yfinance>=0.2.40
 pandas>=2.0.0
 numpy>=1.24.0
 pandas_market_calendars>=4.3.0
@@ -10,3 +9,6 @@ requests>=2.31.0
 # lxml is required by pandas.read_html for the S&P 500 Wikipedia parse
 # in stage1_data/phase_a_universe.py
 lxml>=4.9.0
+# yfinance is no longer used by the active pipeline (data now comes
+# from SEC EDGAR + Stooq, both free and anonymous). It is intentionally
+# omitted from this list.

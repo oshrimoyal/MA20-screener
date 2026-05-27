@@ -68,15 +68,16 @@ paths:
 ### `runtime`
 ```yaml
 runtime:
-  # שלב Phase A — שליפת שווי שוק (endpoint quote, רגיש פחות)
-  # ללא retry: כש-Yahoo חוסם רחב, retry רק מאריך ריצה בלי לעזור
-  workers: 10
-  fetch_sleep_ms: 100
+  # SEC EDGAR — מקור החובה לחישוב שווי שוק
+  # SEC דורש אימייל אמיתי בכותרת User-Agent (מדיניות "fair access").
+  # החלף את הדוגמה ב-email האמיתי שלך.
+  sec_user_agent: "MA20-Screener your-email@example.com"
+  stooq_user_agent: "MA20-Screener your-email@example.com"
 
-  # שלב Phase B — שליפת היסטוריית מחירים (endpoint chart, רגיש מאוד)
+  # Phase B — שליפת היסטוריית מחירים מ-Stooq
   history_workers: 3
   history_sleep_ms: 500
-  history_retries: 3              # ניסיונות נוספים על כשלי yfinance
+  history_retries: 3              # ניסיונות נוספים על כשלי רשת
   history_retry_delay_s: 5        # השהיה התחלתית (5s, 10s, 20s)
 
   min_market_cap_usd: 1000000000  # סף שווי שוק = 1 מיליארד דולר
@@ -84,26 +85,41 @@ runtime:
   test_tickers: ""                # סריקה חלקית לבדיקה — ראה למטה
 ```
 
-**חוסן מול ה-rate-limit של Yahoo:** Phase B מבצע retry אוטומטי עם
-backoff מעריכי. Phase A דווקא לא — תחת חסימה רחבה של Yahoo, retry
-פשוט מאט את הריצה בלי לעזור (כל כשל יחכה כמה שניות לפני שמוותרים).
-כשל בכל שלב מופיע בלוג עם סוג החריג האמיתי (`YFRateLimitError`,
-`JSONDecodeError`) כדי שתוכל לזהות. אם אתה רואה בלוג הרבה
-`FAIL: yfinance error: YFRateLimitError` ב-Phase B, כדאי לצמצם:
-1. **הורד `history_workers` ל-1** — שולח רק קריאה אחת בכל רגע.
-2. **העלה `history_sleep_ms` ל-1000 או 2000** — נותן ל-Yahoo להתאושש.
-3. **הגדל את ה-retries וה-delays** — `history_retries: 5` ו-
-   `history_retry_delay_s: 10` כמעט מובטחים להצליח אבל הריצה תהיה ארוכה.
+**מקורות הנתונים החדשים:** המערכת השתנתה כדי לא להיות תלויה ב-Yahoo
+Finance (שחוסם IP אגרסיבית). כל הנתונים מגיעים משלושה מקורות חינמיים
+וציבוריים — ללא הרשמה ובלי API key:
 
-אם Phase A עצמו זורק הרבה rate-limit, סימן שיאהו חסם את ה-IP. תחכה
-15-30 דקות ותנסה שוב.
+1. **NASDAQ Trader + Wikipedia** — רשימת היקום (S&P 500 + NYSE + NASDAQ
+   Global Select + NYSE American + NYSE Arca).
+2. **SEC EDGAR** — שתי קריאות `https://data.sec.gov/...`:
+   * `company_tickers_exchange.json` — מיפוי טיקר ↔ CIK ↔ בורסה.
+   * XBRL Frames API — מספר המניות הסחירות (`CommonStockSharesOutstanding`)
+     לכל החברות במכה אחת.
+3. **Stooq** — נתוני OHLCV יומיים (`https://stooq.com/q/d/l/?s={ticker}.us&i=d`),
+   60 ימי מסחר אחרונים פר טיקר.
+
+**חישוב שווי שוק:** `שווי שוק = Close אחרון מ-Stooq × מניות סחירות מ-SEC`.
+הסף $1B נשמר; המסנן עבר ל-Phase B.
+
+**חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי על שגיאות
+HTTP זמניות. אם Stooq מחזיר "אין נתונים" עבור טיקר — זה תשובה קבועה
+(לא retry). שורות שגיאה בלוג תיראינה ספציפיות:
+* `shares outstanding unavailable (no SEC CIK)` — ADR/חברה שלא רשומה ב-SEC.
+* `shares outstanding unavailable` — SEC רשם אבל אין נתון shares במאזן.
+* `stooq: Stooq did not return a CSV body for ...` — Stooq לא מכיר את הטיקר.
+* `stooq error after N attempts: HTTPError: ...` — Stooq חסם זמנית; נסה שוב מאוחר יותר.
+* `missing/NaN OHLCV (first missing date ...)` — נתונים חסרים בחלון 60 הימים.
+
+**אם Stooq חוסם אותך** (נדיר — אבל אם זה קורה):
+1. הורד את `history_workers` ל-1.
+2. העלה את `history_sleep_ms` ל-1000 או 2000.
 
 **סינון מקדים של non-stocks:** ה-parser דוחה אוטומטית (לפני שליחת הקריאה
-ל-yfinance) טיקרים שלפי השם הם preferred shares / debentures /
-subordinated notes / trust preferred. דוגמאות שייפלו כבר ב-parse:
+לרשת) טיקרים שלפי השם הם preferred shares / debentures / subordinated
+notes / trust preferred. דוגמאות שייפלו כבר ב-parse:
 `AFGB` (Subordinated Debentures), `BEPH` (Preferred Limited Partnership
-Units), `AIZN` (Subordinated Notes). זה חוסך אלפי קריאות ומקטין לחץ על
-Yahoo. בלוג תראה שורות כמו:
+Units), `AIZN` (Subordinated Notes). זה חוסך אלפי קריאות. בלוג תראה
+שורות כמו:
 ```
 Phase A: dropped 1543 preferred/debenture/note entries from NYSE-proper list
   (matched Security Name pattern).

@@ -1,73 +1,40 @@
-"""Phase A: build the universe from four complementary sources and
-filter by market cap.
+"""Phase A: build the universe from five complementary sources, enrich
+each ticker with its SEC CIK number, and pass on to Phase B.
 
-Universe sources:
-  1. The current S&P 500 constituent list, from the canonical
-     Wikipedia page:
+Universe sources (free, anonymous HTTP — no API key, no signup):
+
+  1. S&P 500 constituent list — Wikipedia:
          https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
-     The S&P 500 captures most of the largest NASDAQ-listed and
-     NYSE-listed names.
-  2. All NYSE-proper common stocks, from NASDAQ Trader's free symbol
-     directory:
-         ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt
-     Filters applied while parsing:
-         Exchange       == "N"   (NYSE proper)
-         Test Issue     == "N"
-         ETF            == "N"
-  3. NASDAQ Global Select Market common stocks, from NASDAQ Trader's
-         ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt
-     Filters applied while parsing:
-         Market Cat.    == "Q"   (NASDAQ Global Select)
-         Test Issue     == "N"
-         ETF            == "N"
-  4. NYSE American common stocks (formerly AMEX), from the same
-     otherlisted.txt file:
-         Exchange       == "A"   (NYSE American)
-         Test Issue     == "N"
-         ETF            == "N"
+  2. NYSE-proper common stocks — NASDAQ Trader otherlisted.txt with
+     Exchange="N".
+  3. NASDAQ Global Select Market common stocks — NASDAQ Trader
+     nasdaqlisted.txt with Market Category="Q".
+  4. NYSE American (formerly AMEX) common stocks — NASDAQ Trader
+     otherlisted.txt with Exchange="A".
+  5. NYSE Arca common stocks — NASDAQ Trader otherlisted.txt with
+     Exchange="P" (Arca hosts mostly ETFs; the ETF=N filter keeps only
+     the small number of common stocks listed on Arca).
 
-  All four sources additionally drop three more classes of non-common-
-  stock symbols at parse time:
-    a) Any symbol that contains the "$" character at any position
-       (NASDAQ Trader uses "$" as the preferred-share-series
-       separator, e.g. "ABR$D", "AGM$E").
-    b) Any symbol ending in a warrant / unit / right suffix —
-       "-W", "-WS", "-WT", "-WI", "-WD", "-U", "-UN", "-R", "-RT",
-       "-RW".
-    c) Any entry whose Security Name clearly identifies a non-common-
-       stock instrument (e.g. "5.875% Subordinated Debentures",
-       "Class A Preferred Limited Partnership Units", "Trust
-       Preferred Securities"). The exact pattern list is in
-       `_NON_COMMON_STOCK_NAME_PATTERNS`. ADRs labelled "American
-       Depositary Receipts" are intentionally preserved.
-  Removing these at parse time also saves the thousands of wasted
-  yfinance round-trips that those symbols would otherwise consume in
-  the marketCap lookup.
+All sources additionally drop three classes of non-common-stock symbols
+at parse time:
+  a) Symbols containing "$" at any position (preferred-share series).
+  b) Symbols ending in a warrant / unit / right suffix
+     (-W, -WS, -WT, -WI, -WD, -U, -UN, -R, -RT, -RW).
+  c) Entries whose Security Name clearly identifies a preferred /
+     debenture / subordinated-note / trust-preferred / convertible-
+     preferred instrument (see `_NON_COMMON_STOCK_NAME_PATTERNS`).
 
-The marketCap lookup is a single yfinance.fast_info call per ticker
-— no retry. Under broad Yahoo rate-limiting, retry only multiplies
-the runtime without recovering tickers. The exception type and
-message are still surfaced in the per-ticker log line (typical:
-`YFRateLimitError`, `JSONDecodeError`, `HTTPError`) so the operator
-can distinguish a genuine missing-marketCap (Yahoo answered cleanly)
-from a rate-limit hit (Yahoo refused).
+After the universe is merged and deduped, every ticker is enriched
+with its SEC CIK (and authoritative exchange label) from SEC EDGAR's
+free `company_tickers_exchange.json`. This is a single static-file
+download and adds no per-ticker round-trips. Tickers SEC does not
+list (e.g. some ADRs filing 20-F) get cik=None and rely on the
+source-known exchange label; they will be dropped in Phase B when
+shares-outstanding lookup fails.
 
-  The four lists are merged and deduplicated by ticker; an entry
-  that appears in more than one source is included exactly once.
-
-Why these four together?
-  The S&P 500 anchors the large-cap names. NYSE-proper (otherlisted
-  Exchange=N) adds every other NYSE-listed common stock. NASDAQ
-  Global Select (nasdaqlisted Market Category=Q) adds every NASDAQ
-  large-tier common stock that is not in the S&P 500. NYSE American
-  (otherlisted Exchange=A) adds the historically AMEX-listed names
-  that pass the $1B market-cap filter.
-
-After the universe is collected, the market cap AND the listing
-exchange of every ticker are read from yfinance.fast_info in a single
-call. Tickers with market cap below the configured threshold (default
-$1B) are dropped. The exchange code is mapped to "NASDAQ" / "NYSE" for
-the TradingView link used in Stage 4.
+**The marketCap >= $1B filter has moved to Phase B**, where it is
+computed as latest_close (from Stooq) × shares_outstanding (from SEC
+EDGAR Frames). Phase A no longer touches Yahoo Finance / yfinance.
 """
 from __future__ import annotations
 
@@ -77,77 +44,33 @@ from typing import Optional
 
 import pandas as pd
 import requests
-import yfinance as yf
 
 from ma20_screener.logger import (
     get_logger,
     log_stage_start,
     log_stage_summary,
-    log_ticker_fail,
 )
-from ma20_screener.utils.concurrency import parallel_map
+from ma20_screener.utils import sec_edgar
 
 SP500_WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
 _HTTP_HEADERS = {"User-Agent": "MA20-Screener/1.0 (+https://github.com/oshrimoyal/MA20-screener)"}
 
-# yfinance fast_info "exchange" codes -> Stage 4 link label.
-# (NMS/NCM/NGM/NGS = NASDAQ tiers; NYQ = NYSE; ASE/PCX = NYSE American / NYSE
-# Arca, both NYSE Group venues and labelled "NYSE" for the TradingView link.)
-_EXCH_CODE_TO_LABEL = {
-    "NMS": "NASDAQ",
-    "NCM": "NASDAQ",
-    "NGM": "NASDAQ",
-    "NGS": "NASDAQ",
-    "NAS": "NASDAQ",
-    "NASDAQ": "NASDAQ",
-    "NYQ": "NYSE",
-    "NYS": "NYSE",
-    "NYSE": "NYSE",
-    "ASE": "NYSE",
-    "PCX": "NYSE",
-    "ARCA": "NYSE",
-}
-
-# Suffixes that mark a non-common-stock instrument and must be filtered
-# out at parse time. NASDAQ Trader uses these conventional suffixes for
-# warrants ("-W*"), units ("-U*") and rights ("-R*"). Filtering them
-# here avoids the yfinance round-trip that would otherwise return
-# "market cap unavailable" for each one. Common-stock class suffixes
-# such as "-A" and "-B" (e.g. BRK-B from BRK.B) are intentionally NOT
-# in this list.
+# Suffix list — preferred-share-series / warrant / unit / right markers.
 _NON_COMMON_STOCK_SUFFIXES = (
-    "-W", "-WS", "-WT", "-WI", "-WD",     # warrants (various Nasdaq variants)
-    "-U", "-UN",                           # units (typically SPAC units)
+    "-W", "-WS", "-WT", "-WI", "-WD",     # warrants
+    "-U", "-UN",                           # units
     "-R", "-RT", "-RW",                    # rights
 )
 
 
 def _looks_like_non_common_stock(ticker: str) -> bool:
-    """True if `ticker` ends with a warrant/unit/right suffix from the
-    NASDAQ Trader convention. `ticker` is already in yfinance form
-    (i.e. "." has been replaced with "-")."""
+    """True if `ticker` ends with a warrant/unit/right suffix."""
     return any(ticker.endswith(sfx) for sfx in _NON_COMMON_STOCK_SUFFIXES)
 
 
-# Substrings in the NASDAQ Trader "Security Name" column that mark a
-# non-common-stock instrument (preferred shares, debentures, subordinated
-# notes, etc.). Matching is case-insensitive. The patterns are chosen
-# conservatively to avoid false positives:
-#   * "Preferred Stock"   — preferred shares marketed as stock
-#   * "Preferred Share"   — singular/plural preferred shares
-#   * "Preferred Limited" — preferred Limited Partnership units
-#   * "% Preferred"       — "5.250% Preferred ..." style names
-#   * "Subordinated"      — Subordinated Debentures / Subordinated Notes
-#   * "Debenture"         — any debenture
-#   * "Senior Note"       — Senior Notes
-#   * "Trust Preferred"
-#   * "Convertible Preferred"
-# Note: a legitimate stock named "Preferred Bank" is NOT caught (the
-# substring "Preferred Stock" does not appear in "Preferred Bank Common
-# Stock"). ADRs labelled "American Depositary Receipts" are also NOT
-# caught (no pattern targets that wording).
+# Security-Name substrings that mark a non-common-stock instrument.
 _NON_COMMON_STOCK_NAME_PATTERNS = (
     "preferred stock",
     "preferred share",
@@ -162,9 +85,8 @@ _NON_COMMON_STOCK_NAME_PATTERNS = (
 
 
 def _looks_like_non_common_stock_by_name(security_name: str) -> bool:
-    """True if the NASDAQ Trader Security Name clearly identifies a
-    non-common-stock instrument (preferred / debenture / note / trust
-    preferred). Case-insensitive substring match."""
+    """True if the Security Name clearly identifies a non-common-stock
+    instrument (preferred / debenture / note / trust preferred)."""
     if not security_name:
         return False
     lower = security_name.lower()
@@ -173,34 +95,40 @@ def _looks_like_non_common_stock_by_name(security_name: str) -> bool:
 
 @dataclass(frozen=True)
 class Symbol:
-    ticker: str            # yfinance-style ticker (dots replaced with dashes)
+    """A ticker as discovered by one of the source parsers.
+
+    `source_exchange` records what we know about the listing exchange
+    from the source itself ("NASDAQ" / "NYSE" / None for sources like
+    the S&P 500 Wikipedia table that don't include the exchange).
+    """
+    ticker: str
+    source_exchange: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class UniverseEntry:
+    """A ticker that completed Phase A: name, exchange label for the
+    Stage-4 TradingView link, and the SEC CIK used by Phase B to look
+    up shares outstanding (None if SEC does not list this ticker)."""
     ticker: str
     exchange: str
-    market_cap: float
+    cik: Optional[int]
 
 
 # ----- Source 1: S&P 500 from Wikipedia ------------------------------------
 
 def fetch_sp500_tickers() -> list[Symbol]:
     """Download the current S&P 500 constituent list from Wikipedia and
-    return it as a list of Symbol records. Tickers are normalised to
-    yfinance form (e.g. "BRK.B" -> "BRK-B")."""
+    return it as Symbol records. Tickers are normalised to internal
+    form (e.g. "BRK.B" -> "BRK-B"). Source exchange is None (we
+    determine it from SEC EDGAR later)."""
     log = get_logger()
     resp = requests.get(SP500_WIKIPEDIA_URL, headers=_HTTP_HEADERS, timeout=30)
     resp.raise_for_status()
 
-    # pandas.read_html requires lxml or html5lib; lxml is in requirements.txt.
     tables = pd.read_html(io.StringIO(resp.text))
     if not tables:
         raise RuntimeError("Wikipedia S&P 500 page returned no parseable tables.")
-
-    # The first table on the page is the constituent list; find the
-    # column that holds the ticker symbol (historically "Symbol",
-    # occasionally "Ticker" / "Ticker symbol").
     constituents = tables[0]
     cols = list(constituents.columns)
     sym_col: Optional[str] = None
@@ -221,17 +149,11 @@ def fetch_sp500_tickers() -> list[Symbol]:
         t = raw.strip().upper().replace(".", "-")
         if not t or t in seen:
             continue
-        # Operator decision: drop any ticker that contains "$" at
-        # any position. NASDAQ Trader / yfinance notation uses "$" as
-        # the preferred-share series marker (e.g. ABR$D, AGM$E) —
-        # these are not common stocks and are out of scope. This
-        # branch is defensive for Wikipedia; the S&P 500 list does
-        # not contain preferred shares in practice.
         if "$" in t:
             skipped_dollar += 1
             continue
         seen.add(t)
-        symbols.append(Symbol(ticker=t))
+        symbols.append(Symbol(ticker=t, source_exchange=None))
     if skipped_dollar:
         log.info(
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
@@ -241,23 +163,23 @@ def fetch_sp500_tickers() -> list[Symbol]:
     return symbols
 
 
-# ----- Sources 2 & 4: NYSE-proper + NYSE American from NASDAQ Trader -------
+# ----- Sources 2, 4, 5: NYSE-proper / NYSE American / NYSE Arca ------------
 
-def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol]:
-    """Internal helper: parse otherlisted.txt for one specific Exchange
-    code and apply the standard filters.
-
-    Filters: Exchange == `exchange_code`, Test Issue == "N", ETF == "N",
-    and no "$" anywhere in the symbol.
-    `label` is used only for log lines (e.g. "NYSE-proper", "NYSE American").
-    """
+def _parse_otherlisted(
+    text: str,
+    exchange_code: str,
+    label: str,
+    source_exchange: str,
+) -> list[Symbol]:
+    """Parse otherlisted.txt for one specific Exchange code and apply
+    the standard filters. `source_exchange` is the label attached to
+    each emitted Symbol (e.g. "NYSE") and `label` is only for the log
+    line (e.g. "NYSE-proper")."""
     log = get_logger()
     lines = text.splitlines()
     if not lines:
         raise RuntimeError("otherlisted.txt is empty.")
     header = lines[0].split("|")
-    # Expected columns:
-    # ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
     try:
         i_sym = header.index("ACT Symbol")
         i_name = header.index("Security Name")
@@ -290,38 +212,22 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
             continue
         if exchange != exchange_code:
             continue
-        if etf != "N":        # exclude ETFs
+        if etf != "N":
             continue
-        # Operator decision: drop any ticker that contains "$" at
-        # any position. NASDAQ Trader uses "$" as the preferred-
-        # series separator (e.g. "ABR$D", "AGM$E"); these are not
-        # common stocks and are out of scope.
         if "$" in symbol:
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
-        # Operator decision: drop tickers ending in warrant / unit /
-        # right suffixes (e.g. ACHR-W, BCSS-U, AIIA-R). These are not
-        # common stocks and yfinance does not return a marketCap for
-        # them — pre-filtering here removes the wasted round-trip.
         if _looks_like_non_common_stock(ticker):
             skipped_suffix += 1
             continue
-        # Operator decision: drop entries whose Security Name clearly
-        # marks a preferred / debenture / subordinated-note / trust-
-        # preferred instrument — names like "American Financial Group
-        # 5.875% Subordinated Debentures" or "Brookfield Renewable
-        # 5.250% Class A Preferred Limited Partnership Units". yfinance
-        # does not return a marketCap for these; filtering them here
-        # eliminates ~1500-2000 wasted round-trips per run in the
-        # production universe.
         if _looks_like_non_common_stock_by_name(sec_name):
             skipped_name += 1
             continue
         if ticker in seen:
             continue
         seen.add(ticker)
-        out.append(Symbol(ticker=ticker))
+        out.append(Symbol(ticker=ticker, source_exchange=source_exchange))
     if skipped_dollar:
         log.info(
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
@@ -338,9 +244,9 @@ def _parse_otherlisted(text: str, exchange_code: str, label: str) -> list[Symbol
             f"from {label} list (matched Security Name pattern)."
         )
     log.info(
-        f"Phase A: parsed {len(out)} {label} stock tickers "
-        f"from NASDAQ Trader (Exchange={exchange_code}, Test=N, ETF=N, "
-        f"no '$', no -W/-U/-R suffix, no preferred/debenture/note name)."
+        f"Phase A: parsed {len(out)} {label} stock tickers from NASDAQ Trader "
+        f"(Exchange={exchange_code}, Test=N, ETF=N, no '$', no -W/-U/-R suffix, "
+        f"no preferred/debenture/note name)."
     )
     return out
 
@@ -354,25 +260,34 @@ def _fetch_otherlisted_text() -> str:
 
 def fetch_nyse_stocks() -> list[Symbol]:
     """NYSE proper (Exchange='N') common stocks."""
-    return _parse_otherlisted(_fetch_otherlisted_text(), "N", "NYSE-proper")
+    return _parse_otherlisted(
+        _fetch_otherlisted_text(), "N", "NYSE-proper", source_exchange="NYSE"
+    )
 
 
 def fetch_nyse_american_stocks() -> list[Symbol]:
     """NYSE American (Exchange='A', formerly AMEX) common stocks."""
-    return _parse_otherlisted(_fetch_otherlisted_text(), "A", "NYSE American")
+    return _parse_otherlisted(
+        _fetch_otherlisted_text(), "A", "NYSE American", source_exchange="NYSE"
+    )
+
+
+def fetch_nyse_arca_stocks() -> list[Symbol]:
+    """NYSE Arca (Exchange='P') common stocks. Arca hosts mostly ETFs;
+    the ETF=N filter keeps only the small number of common stocks
+    listed on Arca."""
+    return _parse_otherlisted(
+        _fetch_otherlisted_text(), "P", "NYSE Arca", source_exchange="NYSE"
+    )
 
 
 # ----- Source 3: NASDAQ Global Select stocks from NASDAQ Trader ------------
 
 def fetch_nasdaq_q_stocks() -> list[Symbol]:
     """Download NASDAQ Global Select Market common stocks from NASDAQ
-    Trader's nasdaqlisted.txt. Returns yfinance-style tickers.
-
-    Filters: Market Category="Q" (NASDAQ Global Select only — excludes
-    Global Market "G" and Capital Market "S"), Test Issue="N",
-    ETF="N", no "$" anywhere in the symbol, no -W/-U/-R suffix, and
-    no preferred/debenture/note pattern in the Security Name.
-    """
+    Trader's nasdaqlisted.txt. Filters: Market Category="Q", Test=N,
+    ETF=N, no "$", no -W/-U/-R suffix, no preferred/debenture/note
+    Security Name."""
     log = get_logger()
     resp = requests.get(NASDAQ_LISTED_URL, headers=_HTTP_HEADERS, timeout=30)
     resp.raise_for_status()
@@ -382,8 +297,6 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
     if not lines:
         raise RuntimeError("nasdaqlisted.txt is empty.")
     header = lines[0].split("|")
-    # Expected columns:
-    # Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
     try:
         i_sym = header.index("Symbol")
         i_name = header.index("Security Name")
@@ -414,27 +327,24 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
             continue
         if test != "N":
             continue
-        if market_cat != "Q":   # NASDAQ Global Select only
+        if market_cat != "Q":
             continue
-        if etf != "N":          # exclude ETFs
+        if etf != "N":
             continue
-        # Same '$' rule as the other sources.
         if "$" in symbol:
             skipped_dollar += 1
             continue
         ticker = symbol.replace(".", "-").upper()
-        # Same warrant/unit/right suffix rule as the otherlisted parsers.
         if _looks_like_non_common_stock(ticker):
             skipped_suffix += 1
             continue
-        # Same Security-Name filter as the otherlisted parsers.
         if _looks_like_non_common_stock_by_name(sec_name):
             skipped_name += 1
             continue
         if ticker in seen:
             continue
         seen.add(ticker)
-        out.append(Symbol(ticker=ticker))
+        out.append(Symbol(ticker=ticker, source_exchange="NASDAQ"))
     if skipped_dollar:
         log.info(
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers from "
@@ -458,167 +368,124 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
     return out
 
 
-# ----- yfinance lookup -----------------------------------------------------
+# ----- Universe orchestration ----------------------------------------------
 
-def _get_market_cap_and_exchange(
-    ticker: str,
-) -> tuple[Optional[float], Optional[str], Optional[str]]:
-    """One yfinance.fast_info round-trip. Returns a triple
-    `(market_cap, exchange_code, error_reason)`:
-      * (mc_float, exch_str, None)  — success.
-      * (None,    exch_str, None)   — Yahoo answered cleanly but had no
-                                       marketCap for this ticker
-                                       (typical for preferred shares /
-                                       bonds / ADRs that yfinance does
-                                       not cover). NOT a transient
-                                       error.
-      * (None,    None,     reason) — yfinance raised an exception.
-                                       `reason` includes the exception
-                                       type+message (typical: Yahoo
-                                       throws YFRateLimitError when
-                                       the IP is throttled).
+def _merge(seen: dict[str, Symbol], new: list[Symbol]) -> int:
+    """Add new symbols to `seen`. Returns the count of entries already
+    in `seen` (the overlap). When a ticker is already present without
+    a source_exchange (typically the Wikipedia/S&P 500 entry that
+    didn't know the exchange) we upgrade to the new Symbol that does
+    carry one."""
+    overlap = 0
+    for s in new:
+        existing = seen.get(s.ticker)
+        if existing is None:
+            seen[s.ticker] = s
+        else:
+            overlap += 1
+            if existing.source_exchange is None and s.source_exchange is not None:
+                seen[s.ticker] = s
+    return overlap
 
-    No retry: experience has shown that under broad Yahoo rate-limiting
-    (which happens when the IP has run many fetches recently) retry
-    only multiplies the runtime without recovering the ticker. The
-    pre-parse Security-Name / suffix / '$' filters already eliminate
-    the bulk of wasted round-trips. Phase B keeps its retry profile
-    because the chart endpoint behaves differently.
-    """
-    try:
-        fi = yf.Ticker(ticker).fast_info
-        mc = fi.get("marketCap") if hasattr(fi, "get") else None
-        ex = fi.get("exchange") if hasattr(fi, "get") else None
-        ex_str = str(ex).strip() if ex is not None else None
-        if mc is None:
-            return None, ex_str, None
-        mc_f = float(mc)
-        if mc_f <= 0:
-            return None, ex_str, None
-        return mc_f, ex_str, None
-    except Exception as e:
-        return None, None, f"yfinance error: {type(e).__name__}: {e}"
-
-
-def _label_for_exchange(code: Optional[str]) -> str:
-    """Map an yfinance exchange code to "NASDAQ" or "NYSE" for the
-    TradingView link in Stage 4. Unknown codes fall back to "NYSE"
-    (the larger of the two venues by membership in this universe)."""
-    if not code:
-        return "NYSE"
-    return _EXCH_CODE_TO_LABEL.get(code.upper(), "NYSE")
-
-
-# ----- Phase A entry point -------------------------------------------------
 
 def fetch_universe() -> list[Symbol]:
-    """Fetch S&P 500 + NYSE-proper + NASDAQ-Global-Select + NYSE
-    American universe, merged and deduplicated. Raises on any source
-    failure (so the operator sees the problem rather than running on
-    a partial universe).
-
-    otherlisted.txt is downloaded once and parsed twice (once for
-    Exchange=N and once for Exchange=A) to avoid a redundant HTTP
-    round-trip.
-    """
+    """Fetch S&P 500 + NYSE-proper + NASDAQ-Global-Select + NYSE-American
+    + NYSE-Arca, merged and deduplicated. otherlisted.txt is downloaded
+    once and parsed three times (Exchange=N, A, P)."""
     log = get_logger()
     sp500 = fetch_sp500_tickers()
     otherlisted_text = _fetch_otherlisted_text()
-    nyse = _parse_otherlisted(otherlisted_text, "N", "NYSE-proper")
+    nyse = _parse_otherlisted(otherlisted_text, "N", "NYSE-proper", "NYSE")
     nasdaq_q = fetch_nasdaq_q_stocks()
-    nyse_american = _parse_otherlisted(otherlisted_text, "A", "NYSE American")
+    nyse_american = _parse_otherlisted(otherlisted_text, "A", "NYSE American", "NYSE")
+    nyse_arca = _parse_otherlisted(otherlisted_text, "P", "NYSE Arca", "NYSE")
 
-    merged: dict[str, Symbol] = {}
-    for s in sp500:
-        merged.setdefault(s.ticker, s)
-    nyse_overlap = sum(1 for s in nyse if s.ticker in merged)
-    for s in nyse:
-        merged.setdefault(s.ticker, s)
-    nasdaq_overlap = sum(1 for s in nasdaq_q if s.ticker in merged)
-    for s in nasdaq_q:
-        merged.setdefault(s.ticker, s)
-    amex_overlap = sum(1 for s in nyse_american if s.ticker in merged)
-    for s in nyse_american:
-        merged.setdefault(s.ticker, s)
+    seen: dict[str, Symbol] = {}
+    _merge(seen, sp500)
+    nyse_overlap = _merge(seen, nyse)
+    nasdaq_overlap = _merge(seen, nasdaq_q)
+    amex_overlap = _merge(seen, nyse_american)
+    arca_overlap = _merge(seen, nyse_arca)
 
-    out = list(merged.values())
+    out = list(seen.values())
     log.info(
         f"Phase A: merged universe — S&P 500 ({len(sp500)}) + NYSE ({len(nyse)}) "
-        f"+ NASDAQ-Q ({len(nasdaq_q)}) + NYSE-American ({len(nyse_american)}); "
-        f"NYSE overlap with S&P 500={nyse_overlap}; "
-        f"NASDAQ-Q overlap with (S&P 500 ∪ NYSE)={nasdaq_overlap}; "
-        f"NYSE-American overlap with (S&P 500 ∪ NYSE ∪ NASDAQ-Q)={amex_overlap}; "
+        f"+ NASDAQ-Q ({len(nasdaq_q)}) + NYSE-American ({len(nyse_american)}) "
+        f"+ NYSE-Arca ({len(nyse_arca)}); overlaps with prior set: "
+        f"NYSE={nyse_overlap}, NASDAQ-Q={nasdaq_overlap}, "
+        f"NYSE-American={amex_overlap}, NYSE-Arca={arca_overlap}; "
         f"final unique tickers = {len(out)}."
     )
     return out
 
 
+# ----- Phase A entry point -------------------------------------------------
+
 def run_phase_a(
-    workers: int,
-    fetch_sleep_ms: int,
-    min_market_cap_usd: float,
-    test_tickers: list[str] | None = None,
+    sec_user_agent: str,
+    test_tickers: Optional[list[str]] = None,
 ) -> list[UniverseEntry]:
     """Execute Phase A end-to-end:
-       1. Build the universe = S&P 500 ∪ NYSE-proper ∪ NASDAQ-Global-
-          Select ∪ NYSE-American stocks (or use test_tickers).
-       2. Look up market cap + listing exchange for each via yfinance.
-       3. Keep only tickers with market cap >= min_market_cap_usd.
 
-    Phase A does NOT retry on yfinance errors: when Yahoo broadly
-    rate-limits the IP, retrying multiplies the runtime without
-    recovering tickers. yfinance exceptions are surfaced in the
-    per-ticker log line so the operator can see the actual cause
-    (YFRateLimitError, JSONDecodeError, ...).
+       1. Build the universe = union of the five source lists (or use
+          `test_tickers` for a fast smoke run).
+       2. Download SEC EDGAR's company_tickers_exchange.json (one
+          static file) and enrich each ticker with its CIK + the
+          authoritative exchange label.
+       3. Return UniverseEntry list. The marketCap filter has moved to
+          Phase B (it is computed from Stooq close × SEC shares
+          outstanding, both fetched there).
+
+    Tickers SEC does not list keep their source-known exchange label
+    and `cik=None`; Phase B will drop them with reason "shares
+    outstanding unavailable".
     """
     log = get_logger()
     log_stage_start(
-        "STAGE 1 — Phase A (S&P 500 + NYSE + NASDAQ-Q + NYSE-American + market cap filter)"
+        "STAGE 1 — Phase A (universe build + SEC CIK enrichment)"
     )
 
     if test_tickers:
         log.info(f"Phase A: using TEST ticker override: {test_tickers}")
-        symbols = [Symbol(ticker=t.replace(".", "-").upper()) for t in test_tickers]
+        symbols = [
+            Symbol(ticker=t.replace(".", "-").upper(), source_exchange=None)
+            for t in test_tickers
+        ]
     else:
         symbols = fetch_universe()
 
-    def _lookup(sym: Symbol) -> tuple[Symbol, Optional[float], Optional[str], Optional[str]]:
-        mc, ex, err = _get_market_cap_and_exchange(sym.ticker)
-        return sym, mc, ex, err
-
-    log.info(
-        f"Phase A: looking up market cap + exchange for {len(symbols)} tickers "
-        f"(workers={workers}, sleep_ms={fetch_sleep_ms})…"
-    )
-    quads = parallel_map(_lookup, symbols, workers=workers, sleep_ms=fetch_sleep_ms)
+    log.info("Phase A: downloading SEC EDGAR company_tickers_exchange.json …")
+    sec_map = sec_edgar.fetch_company_tickers(sec_user_agent)
+    log.info(f"Phase A: SEC EDGAR returned CIK + exchange for {len(sec_map)} tickers.")
 
     universe: list[UniverseEntry] = []
-    for sym, mc, ex_code, err in quads:
-        if err is not None:
-            # Exception bubbled up from all retry attempts — surface the
-            # actual yfinance error so the operator sees throttle hits
-            # (YFRateLimitError, JSONDecodeError, HTTPError ...).
-            log_ticker_fail(sym.ticker, err)
-            continue
-        if mc is None:
-            # Yahoo answered cleanly with no marketCap. Typical for
-            # preferred shares / bonds / ADRs that yfinance does not
-            # cover. Not a transient error.
-            log_ticker_fail(sym.ticker, "market cap unavailable")
-            continue
-        if mc < min_market_cap_usd:
-            log_ticker_fail(
-                sym.ticker,
-                f"market cap ${mc:,.0f} below ${min_market_cap_usd:,.0f}",
-            )
-            continue
-        universe.append(
-            UniverseEntry(
-                ticker=sym.ticker,
-                exchange=_label_for_exchange(ex_code),
-                market_cap=mc,
-            )
-        )
+    matched_count = 0
+    unmatched_count = 0
+    for sym in symbols:
+        sec_entry = sec_map.get(sym.ticker)
+        if sec_entry is not None:
+            cik, sec_ex_str = sec_entry
+            matched_count += 1
+        else:
+            cik, sec_ex_str = None, ""
+            unmatched_count += 1
+        # Choose the exchange label in priority order:
+        # 1) authoritative SEC value, if recognised
+        # 2) source_exchange (NASDAQ Trader / nasdaqlisted)
+        # 3) default fallback "NYSE"
+        sec_label = sec_edgar.normalise_sec_exchange(sec_ex_str)
+        if sec_label:
+            exchange = sec_label
+        elif sym.source_exchange:
+            exchange = sym.source_exchange
+        else:
+            exchange = "NYSE"
+        universe.append(UniverseEntry(ticker=sym.ticker, exchange=exchange, cik=cik))
 
+    log.info(
+        f"Phase A: matched {matched_count} tickers to SEC CIK; "
+        f"{unmatched_count} unmatched (mostly ADRs / foreign issuers — "
+        f"these will be dropped in Phase B as 'shares outstanding unavailable')."
+    )
     log_stage_summary("STAGE 1 — Phase A", entered=len(symbols), passed=len(universe))
     return universe

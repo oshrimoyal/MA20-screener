@@ -22,14 +22,9 @@ class PathsConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    # Phase A (marketCap via yfinance.fast_info — quote endpoint).
-    # No retry: under broad Yahoo rate-limiting, retry only multiplies
-    # the runtime without recovering tickers.
-    workers: int
-    fetch_sleep_ms: int
-    # Phase B (OHLCV via yfinance.Ticker.history — chart endpoint).
-    # Yahoo's chart endpoint rate-limits aggressively, so Phase B uses
-    # lower concurrency, longer sleeps, and bounded retry-with-backoff.
+    # Phase B (Stooq OHLCV) concurrency profile. Stooq's rate limit is
+    # undocumented but generous at ~2 req/sec; we throttle in case of
+    # transient errors and rely on retry-with-exponential-backoff.
     history_workers: int
     history_sleep_ms: int
     history_retries: int          # attempts AFTER the first try
@@ -38,6 +33,12 @@ class RuntimeConfig:
     min_market_cap_usd: float
     history_trading_days: int
     test_tickers: list[str]
+    # SEC EDGAR fair-access policy: every request MUST include a real
+    # contact email in the User-Agent header. The operator must set
+    # this in config.yaml. Stooq does not require contact info but a
+    # polite UA is good practice.
+    sec_user_agent: str
+    stooq_user_agent: str
 
 
 @dataclass(frozen=True)
@@ -80,13 +81,16 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
     test_tickers_raw = rt_raw.get("test_tickers", "") or ""
     test_tickers = [t.strip().upper() for t in str(test_tickers_raw).split(",") if t.strip()]
 
+    sec_user_agent = str(_require(rt_raw, "sec_user_agent", "runtime")).strip()
+    if "@" not in sec_user_agent:
+        raise ValueError(
+            "runtime.sec_user_agent must include a real contact email "
+            "per SEC's fair-access policy. Example: "
+            "'MA20-Screener you@example.com'."
+        )
+    stooq_user_agent = str(rt_raw.get("stooq_user_agent", sec_user_agent)).strip()
+
     runtime = RuntimeConfig(
-        workers=int(_require(rt_raw, "workers", "runtime")),
-        fetch_sleep_ms=int(_require(rt_raw, "fetch_sleep_ms", "runtime")),
-        # Phase B settings default to a more conservative profile.
-        # Yahoo's chart/history endpoint is rate-limited harder, so we
-        # use 3 retries with 5 s initial delay (5 s, 10 s, 20 s = up to
-        # 35 s of waiting per ticker) to push the success rate above 95 %.
         history_workers=int(rt_raw.get("history_workers", 3)),
         history_sleep_ms=int(rt_raw.get("history_sleep_ms", 500)),
         history_retries=int(rt_raw.get("history_retries", 3)),
@@ -94,6 +98,8 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
         test_tickers=test_tickers,
+        sec_user_agent=sec_user_agent,
+        stooq_user_agent=stooq_user_agent,
     )
 
     return AppConfig(telegram=telegram, paths=paths, runtime=runtime)

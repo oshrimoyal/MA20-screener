@@ -1,27 +1,43 @@
-"""Phase B: pull OHLCV history for the last 60 closed trading days, with
-strict validation. Any ticker that fails validation is rejected and the
-reason is logged. No imputation is ever performed.
+"""Phase B: fetch 60-day OHLCV from Stooq, look up shares outstanding
+from SEC EDGAR, compute marketCap, and apply the >=$1B filter.
 
-Yahoo's chart/history endpoint (used by `yfinance.Ticker.history`) is
-rate-limited more aggressively than the quote endpoint used by Phase A
-(fast_info). To stay within Yahoo's limits and remain resilient to
-transient errors, Phase B uses:
-  * a dedicated, lower concurrency setting (`history_workers`) and a
-    longer per-call sleep (`history_sleep_ms`);
-  * a bounded retry-with-exponential-backoff around the actual fetch
-    (`history_retries` attempts after the first try, starting at
-    `history_retry_delay_s` seconds and doubling between retries);
-  * explicit logging of the underlying yfinance exception type and
-    message — so when Yahoo throttles, the operator sees `JSONDecodeError`
-    or `HTTPError 429` instead of a generic "no data returned".
+This is the largest behavioural change in the project: Yahoo Finance
+(yfinance) is no longer involved. Instead we combine two free,
+anonymous HTTP sources:
+
+  * Stooq — per-ticker daily CSV at
+    https://stooq.com/q/d/l/?s={ticker}.us&i=d. Returns full daily
+    history; we slice to the expected 60-trading-day window. No
+    signup, no API key. Per-call retry-with-exponential-backoff
+    handles transient errors; `StooqNotFound` (Stooq returns no CSV)
+    is treated as a permanent answer and not retried.
+
+  * SEC EDGAR XBRL Frames API — ONE bulk call per recent calendar
+    quarter returns `CommonStockSharesOutstanding` for every U.S.
+    filer at that period end. We iterate the most recent 2-4 quarters
+    and take the first value found per CIK. Free, anonymous, but
+    requires a real contact email in the User-Agent header.
+
+For each universe ticker we:
+  1. Look up shares outstanding by CIK (from the bulk SEC fetch).
+     Tickers with `cik=None` or no shares data are rejected as
+     "shares outstanding unavailable" (typical for ADRs filing 20-F).
+  2. Fetch the daily OHLCV CSV from Stooq, validate that it covers
+     the expected 60 closed trading days with no NaN values.
+  3. Compute marketCap = latest_close × shares_outstanding. Apply the
+     >=$1B filter here (it has moved from Phase A).
+
+The shares-outstanding figure is up to 90 days stale (quarterly
+filings); irrelevant for the $1B cut-off because large-cap share
+counts move slowly.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import pandas as pd
-import yfinance as yf
 
 from ma20_screener.logger import (
     get_logger,
@@ -29,6 +45,7 @@ from ma20_screener.logger import (
     log_stage_summary,
     log_ticker_fail,
 )
+from ma20_screener.utils import sec_edgar, stooq
 from ma20_screener.utils.concurrency import parallel_map
 from ma20_screener.utils.market_time import get_last_n_closed_trading_days
 from ma20_screener.stage1_data.phase_a_universe import UniverseEntry
@@ -44,72 +61,57 @@ class HistoryEntry:
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
 
 
-def _fetch_history_once(ticker: str, start, end) -> pd.DataFrame:
-    """Single yfinance fetch. Raises on yfinance error so the caller's
-    retry loop can react; returns the raw DataFrame (which may be empty
-    when the symbol genuinely has no data)."""
-    return yf.Ticker(ticker).history(
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        interval="1d",
-        auto_adjust=False,
-        actions=False,
-        timeout=30,
-    )
-
-
-def _fetch_history_with_retry(
+def _fetch_stooq_with_retry(
     ticker: str,
-    start,
-    end,
+    user_agent: str,
     retries: int,
     retry_delay_s: float,
-) -> tuple[pd.DataFrame | None, str | None]:
-    """Fetch OHLCV with bounded retry on exception.
+) -> tuple[Optional[pd.DataFrame], Optional[str]]:
+    """Fetch full daily history from Stooq with bounded retry on
+    transient errors. `StooqNotFound` is treated as permanent (no
+    retry) since Stooq has answered cleanly that the ticker is not
+    in its database.
 
-    Returns (DataFrame, None) on success (the DataFrame may still be
-    empty — that is a genuine "no data" answer from Yahoo and not a
-    transient error). Returns (None, reason) when every attempt
-    raises; `reason` includes the exception type and message of the
-    LAST attempt so the operator can see what Yahoo is actually
-    returning (typical patterns: JSONDecodeError when Yahoo serves
-    HTML throttle pages, HTTPError 429 / 401 / 403 when the request
-    is rejected outright).
+    Returns (DataFrame, None) on success or (None, reason) on
+    permanent failure. The reason string includes the exception type
+    so the operator can distinguish Stooq HTTP throttles from genuine
+    "ticker unknown" answers.
     """
-    last_exc: Exception | None = None
+    last_exc: Optional[Exception] = None
     delay = retry_delay_s
     total_attempts = max(1, retries + 1)
     for attempt in range(total_attempts):
         try:
-            return _fetch_history_once(ticker, start, end), None
+            return stooq.fetch_ohlcv(ticker, user_agent), None
+        except stooq.StooqNotFound as e:
+            # Permanent — Stooq does not have this ticker. Don't retry.
+            return None, f"stooq: {e}"
         except Exception as e:
             last_exc = e
             if attempt < total_attempts - 1:
                 time.sleep(delay)
                 delay *= 2.0
     reason = (
-        f"yfinance error after {total_attempts} attempts: "
+        f"stooq error after {total_attempts} attempts: "
         f"{type(last_exc).__name__}: {last_exc}"
     )
     return None, reason
 
 
 def _validate_history(
-    df: pd.DataFrame | None,
+    df: Optional[pd.DataFrame],
     expected_dates: list[pd.Timestamp],
-) -> tuple[pd.DataFrame | None, str | None]:
-    """Strict validation against the expected trading-day list.
-
-    Returns (clean_df, None) on success or (None, reason) on failure. The
-    clean_df has exactly len(expected_dates) rows indexed by date (no
-    tz), with OHLCV float columns and no NaN.
-    """
+) -> tuple[Optional[pd.DataFrame], Optional[str]]:
+    """Strict validation against the expected trading-day list. Returns
+    (clean_df, None) on success or (None, reason) on failure. clean_df
+    has exactly len(expected_dates) rows indexed by date (no tz), with
+    OHLCV float columns and no NaN."""
     if df is None:
         return None, "no data returned"
     if df.empty:
         return None, "empty dataframe"
 
-    # Normalize the index to date (drop tz / time component).
+    # Normalize index to date (drop tz/time).
     idx = df.index
     if isinstance(idx, pd.DatetimeIndex):
         if idx.tz is not None:
@@ -117,13 +119,11 @@ def _validate_history(
         df = df.copy()
         df.index = idx.normalize()
 
-    # Keep only the expected OHLCV columns.
     for col in _OHLCV_COLS:
         if col not in df.columns:
             return None, f"missing column {col}"
     df = df[_OHLCV_COLS]
 
-    # Reindex against expected_dates: any missing date -> NaN row -> failure.
     expected_norm = [pd.Timestamp(d).normalize() for d in expected_dates]
     aligned = df.reindex(expected_norm)
 
@@ -131,7 +131,6 @@ def _validate_history(
         return None, "length mismatch after alignment"
 
     if aligned.isna().any().any():
-        # Identify the missing dates for a clearer reason.
         bad_rows = aligned.index[aligned.isna().any(axis=1)]
         first_bad = bad_rows[0].strftime("%Y-%m-%d") if len(bad_rows) > 0 else "?"
         return None, f"missing/NaN OHLCV (first missing date {first_bad})"
@@ -145,46 +144,82 @@ def run_phase_b(
     history_trading_days: int,
     workers: int,
     fetch_sleep_ms: int,
-    retries: int = 2,
-    retry_delay_s: float = 3.0,
+    min_market_cap_usd: float,
+    sec_user_agent: str,
+    stooq_user_agent: str,
+    retries: int = 3,
+    retry_delay_s: float = 5.0,
 ) -> list[HistoryEntry]:
-    """Fetch OHLCV for every ticker in `universe`. Reject any ticker whose
-    data does not cover exactly the last `history_trading_days` closed
-    trading days with no missing values.
+    """Run Phase B end-to-end.
 
-    `retries` is the number of *additional* attempts after the first
-    yfinance call fails; `retry_delay_s` is the initial backoff (it
-    doubles between successive retries).
+    1. ONE bulk fetch of `CommonStockSharesOutstanding` from SEC EDGAR
+       (1-4 HTTP calls, no per-ticker round-trip).
+    2. Per-ticker (parallel, throttled) Stooq OHLCV fetch + strict
+       validation.
+    3. marketCap = latest close × shares; filter >= `min_market_cap_usd`.
     """
     log = get_logger()
-    log_stage_start("STAGE 1 — Phase B (OHLCV pull + strict validation)")
+    log_stage_start(
+        "STAGE 1 — Phase B (Stooq OHLCV + SEC shares + marketCap filter)"
+    )
 
+    # ---- 1. SEC EDGAR shares outstanding (bulk) ---------------------------
+    log.info("Phase B: fetching shares outstanding from SEC EDGAR XBRL Frames …")
+    shares_by_cik, quarters_used = sec_edgar.fetch_shares_outstanding(
+        user_agent=sec_user_agent,
+    )
+    log.info(
+        f"Phase B: SEC EDGAR returned shares for {len(shares_by_cik)} CIKs "
+        f"(quarters: {quarters_used or '<none returned>'})."
+    )
+
+    # ---- 2. Per-ticker Stooq OHLCV + marketCap ----------------------------
     expected_dates = get_last_n_closed_trading_days(history_trading_days)
-    start = expected_dates[0]
-    end = expected_dates[-1] + pd.Timedelta(days=1)  # yfinance end is exclusive
     log.info(
         f"Phase B: pulling {history_trading_days} trading days "
-        f"({start.strftime('%Y-%m-%d')} → {expected_dates[-1].strftime('%Y-%m-%d')}) "
-        f"for {len(universe)} tickers "
+        f"({expected_dates[0].strftime('%Y-%m-%d')} → "
+        f"{expected_dates[-1].strftime('%Y-%m-%d')}) "
+        f"for {len(universe)} tickers from Stooq "
         f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
         f"retries={retries}, retry_delay_s={retry_delay_s})…"
     )
 
-    def _job(u: UniverseEntry) -> HistoryEntry | None:
-        df, fetch_reason = _fetch_history_with_retry(
-            u.ticker, start, end, retries=retries, retry_delay_s=retry_delay_s
+    def _job(u: UniverseEntry) -> Optional[HistoryEntry]:
+        # 2a. Shares outstanding from the pre-fetched bulk dict.
+        if u.cik is None:
+            log_ticker_fail(u.ticker, "shares outstanding unavailable (no SEC CIK)")
+            return None
+        shares = shares_by_cik.get(u.cik)
+        if shares is None:
+            log_ticker_fail(u.ticker, "shares outstanding unavailable")
+            return None
+
+        # 2b. OHLCV from Stooq with bounded retry.
+        df, fetch_reason = _fetch_stooq_with_retry(
+            u.ticker, stooq_user_agent, retries=retries, retry_delay_s=retry_delay_s
         )
         if fetch_reason is not None:
             log_ticker_fail(u.ticker, fetch_reason)
             return None
-        clean, reason = _validate_history(df, expected_dates)
-        if reason is not None:
-            log_ticker_fail(u.ticker, reason)
+        clean, val_reason = _validate_history(df, expected_dates)
+        if val_reason is not None:
+            log_ticker_fail(u.ticker, val_reason)
             return None
+
+        # 2c. marketCap = latest close × shares; apply >= $1B filter.
+        latest_close = float(clean["Close"].iloc[-1])
+        market_cap = latest_close * float(shares)
+        if market_cap < min_market_cap_usd:
+            log_ticker_fail(
+                u.ticker,
+                f"market cap ${market_cap:,.0f} below ${min_market_cap_usd:,.0f}",
+            )
+            return None
+
         return HistoryEntry(
             ticker=u.ticker,
             exchange=u.exchange,
-            market_cap=u.market_cap,
+            market_cap=market_cap,
             ohlcv=clean,
         )
 
