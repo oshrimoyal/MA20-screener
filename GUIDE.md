@@ -96,6 +96,11 @@ runtime:
    `isActivelyTrading=true`, `country=US`. ה-response כולל את
    `marketCap` ו-`exchangeShortName` ישירות.
 
+   **שני פילטרים נוספים ב-client**:
+   * כל ticker שמכיל `$` נזרק (preferred shares).
+   * כל ticker שמכיל `-` נזרק (class B shares כמו `BRK.B` שמומרים
+     ל-`BRK-B`; FMP חוסם אותם ממילא ב-tier הנוכחי).
+
 2. **Phase B — `/stable/historical-price-eod/full?symbol=X`**:
    קריאה אחת לכל טיקר (~1,900 קריאות לריצה מלאה של NASDAQ + NYSE).
    מחזיר OHLCV יומי.

@@ -10,12 +10,19 @@ the screener and instead makes one /stable/quote call per requested
 symbol. This keeps smoke runs cheap (a handful of calls) without
 pulling the full ~1,900-ticker universe.
 
-A `$`-in-ticker client-side filter drops preferred-share series that
-slip through (rare, but cheap to enforce). All other "non-common
-stock" classes (warrants, units, rights) are filtered by FMP's
-`isActivelyTrading`/`isEtf`/`isFund` flags or fail downstream in
-Phase B with no historical data; we do NOT enforce additional suffix
-filters in code.
+Two client-side ticker-character filters apply after the screener:
+  * Any ticker containing `$` -> dropped (preferred-share series).
+  * Any ticker containing `-` -> dropped. After the dot-to-dash
+    normalisation, class-share variants such as `BRK.B`/`BF.B`
+    arrive here as `BRK-B`/`BF-B`. FMP gates these tickers to a
+    higher tier on `/stable/historical-price-eod/full` anyway, so
+    dropping them in Phase A saves a wasted call per ticker in
+    Phase B.
+
+All other "non-common stock" classes (warrants, units, rights) are
+filtered by FMP's `isActivelyTrading`/`isEtf`/`isFund` flags or fail
+downstream in Phase B with no historical data; we do NOT enforce
+additional suffix filters in code.
 """
 from __future__ import annotations
 
@@ -66,6 +73,7 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
     log = get_logger()
     seen: dict[str, UniverseEntry] = {}
     skipped_dollar = 0
+    skipped_dash = 0
     skipped_unknown_exchange = 0
     skipped_below_floor = 0
     skipped_dup = 0
@@ -95,6 +103,13 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
             if "$" in ticker:
                 skipped_dollar += 1
                 continue
+            if "-" in ticker:
+                # Drops class-B-style tickers (BRK.B -> BRK-B after
+                # the dot->dash normalisation) which FMP gates to a
+                # higher tier on /stable/historical-price-eod/full
+                # anyway.
+                skipped_dash += 1
+                continue
             normalised_ex = _normalise_exchange(row.get("exchangeShortName") or "")
             if normalised_ex is None:
                 skipped_unknown_exchange += 1
@@ -122,6 +137,12 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
         log.info(
             f"Phase A: dropped {skipped_dollar} '$'-bearing tickers "
             f"(preferred-share series)."
+        )
+    if skipped_dash:
+        log.info(
+            f"Phase A: dropped {skipped_dash} '-'-bearing tickers "
+            f"(class-share variants like BRK.B / BF.B that FMP gates "
+            f"to a higher tier on /historical-price-eod/full)."
         )
     if skipped_unknown_exchange:
         log.info(
@@ -156,6 +177,9 @@ def _build_from_test_tickers(
             continue
         if "$" in ticker:
             log_ticker_fail(ticker, "ticker contains '$'")
+            continue
+        if "-" in ticker:
+            log_ticker_fail(ticker, "ticker contains '-' (class-share variant)")
             continue
         try:
             quote = fmp.fetch_quote(ticker, fmp_api_key)
