@@ -16,7 +16,8 @@ helper refuses to send a request without an "@" in the User-Agent.
 
 (Previous revisions also queried the SEC XBRL Frames API for
 `CommonStockSharesOutstanding`. That second endpoint was retired when
-Phase B moved to Finnhub for both OHLCV and market cap.)
+Phase B moved to a dedicated market-data provider for both OHLCV and
+market cap.)
 """
 from __future__ import annotations
 

@@ -6,12 +6,13 @@
 
 ## מה המערכת עושה?
 
-המערכת סורקת **את כל המניות הנסחרות בבורסות NYSE ו-NASDAQ** (כולל ETF
-ומניות ADR זרות), ובכל ריצה מבצעת ארבעה שלבים:
+המערכת סורקת **את מניות מדד S&P 500 בלבד** (~503 מניות), ובכל ריצה
+מבצעת ארבעה שלבים:
 
-1. **שלב 1 — תשתית נתונים:** משיגה את רשימת כל המניות, מסננת מניות עם
-   שווי שוק מתחת למיליארד דולר, מורידה נתוני מסחר יומיים של 60 ימי
-   מסחר אחרונים, ומחשבת אינדיקטורים (SMA20, ATR%, CCI14, גאפים פתוחים).
+1. **שלב 1 — תשתית נתונים:** משיגה את רשימת מניות ה-S&P 500 מ-Wikipedia,
+   מורידה נתוני מסחר יומיים של 60 ימי מסחר אחרונים ושווי שוק מ-FMP,
+   מסננת מניות עם שווי שוק מתחת למיליארד דולר, ומחשבת אינדיקטורים
+   (SMA20, ATR%, CCI14, גאפים פתוחים).
 2. **שלב 2 — בדיקות גולמיות:** מריצה על כל מניה 6 בדיקות (מגמה
    חודשית/שבועית, נר אחרון וצורות, ווליום, מיקום מול ה-SMA20, גאפים מול
    המחיר, מצב CCI).
@@ -73,16 +74,17 @@ runtime:
   # החלף את הדוגמה ב-email האמיתי שלך.
   sec_user_agent: "MA20-Screener your-email@example.com"
 
-  # Finnhub — Phase B (OHLCV + שווי שוק).
-  # הירשם חינם ב-https://finnhub.io/register, העתק את ה-API key
-  # מה-dashboard ושים אותו בשורה הבאה. ה-free tier הוא 60 קריאות/דקה.
-  finnhub_api_key: "PUT-YOUR-FINNHUB-API-KEY-HERE"
+  # FMP — Phase B (OHLCV + שווי שוק).
+  # הירשם חינם ב-https://site.financialmodelingprep.com/register,
+  # העתק את ה-API key מה-dashboard ושים אותו בשורה הבאה.
+  # ה-free tier הוא 250 קריאות/יום ו-5 קריאות/דקה.
+  fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
-  # Phase B — concurrency profile (תואם ל-Finnhub free tier)
+  # Phase B — concurrency profile (תואם ל-FMP free tier)
   history_workers: 1
-  history_sleep_ms: 1100
+  history_sleep_ms: 12500
   history_retries: 3              # ניסיונות נוספים על כשלי רשת
-  history_retry_delay_s: 10       # השהיה התחלתית לשגיאות גנריות
+  history_retry_delay_s: 15       # השהיה התחלתית לשגיאות גנריות
 
   min_market_cap_usd: 1000000000  # סף שווי שוק = 1 מיליארד דולר
   history_trading_days: 60        # חלון היסטוריה = 60 ימי מסחר
@@ -91,53 +93,46 @@ runtime:
 
 **מקורות הנתונים:** המערכת משתמשת בשני מקורות חינמיים בלבד:
 
-1. **NASDAQ Trader + Wikipedia + SEC EDGAR** — רשימת היקום (S&P 500 +
-   NYSE + NASDAQ Global Select + NYSE American + NYSE Arca) ותוויות
-   בורסה אמינות לכל טיקר. ללא API key.
-2. **Finnhub** — שני endpoints לכל טיקר:
-   * `/stock/candle` — OHLCV יומי של 60 ימי מסחר.
-   * `/stock/profile2` — שווי שוק (`marketCapitalization` במיליוני USD).
+1. **Wikipedia + SEC EDGAR** — רשימת מניות ה-S&P 500 ותוויות בורסה
+   (NYSE/NASDAQ) לכל טיקר. ללא API key.
+2. **FMP (Financial Modeling Prep)** — שני endpoints, שניהם מקובצים
+   (batch) כדי לחסוך קריאות:
+   * `/historical-price-full` — OHLCV יומי, עד **3 טיקרים בקריאה אחת**
+     (FMP מחייב שכל הטיקרים יהיו מאותה בורסה).
+   * `/quote` — שווי שוק (`marketCap`) ל-50 טיקרים בקריאה אחת.
 
-   דורש signup חד-פעמי באתר Finnhub והעתקת API key. ה-free tier הוא
-   60 קריאות/דקה — כלומר בריצה מלאה (~3,930 טיקרים × 2 קריאות) הסריקה
-   לוקחת בערך **2-2.5 שעות**. זה המחיר של חינמי + יציב.
+   דורש signup חד-פעמי באתר FMP והעתקת API key. ה-free tier הוא 250
+   קריאות/יום ו-5 קריאות/דקה — כלומר ריצה מלאה (~503 טיקרים) צורכת
+   כ-180 קריאות וכמעט ~35 דקות. **מומלץ ריצה אחת ביום (UTC) — מעבר
+   ל-250 קריאות תיחסם עד חצות UTC.**
 
-**חישוב שווי שוק:** `שווי שוק = marketCapitalization של Finnhub × 1,000,000`.
-הסף $1B נשמר.
+**חישוב שווי שוק:** `שווי שוק = quote.marketCap של FMP` (כבר ב-USD,
+ללא צורך בכפל).
 
-**חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי. תשובת
-"לא מכיר את הטיקר" של Finnhub נחשבת קבועה (לא retry). שגיאה 429 (rate
-limit) מקבלת backoff חזק יותר (20s, 40s, 80s). שורות שגיאה בלוג:
-* `finnhub candle: Finnhub /stock/candle returned s='no_data' for ...` —
-  Finnhub לא מכיר את הטיקר או שאין לו נתונים בחלון 60 הימים.
-* `finnhub profile: Finnhub /stock/profile2 has no positive marketCapitalization ...`
-  — Finnhub מכיר את הטיקר אבל אין לו שווי שוק (נדיר; ADR מסוים, או
-  טיקר שעדיין לא עודכן).
-* `finnhub candle rate-limited after N attempts: ...` — חרגנו מהקצב של
-  60 קריאות/דקה. אם זה קורה הרבה, הורד עוד את ה-`history_workers` או
-  העלה את `history_sleep_ms` ל-1500-2000.
-* `finnhub candle error after N attempts: HTTPError: ...` — שגיאת רשת
-  אחרת אחרי כל הניסיונות.
-* `missing/NaN OHLCV (first missing date ...)` — Finnhub החזיר נתונים
-  אבל חסרים ימים בתוך החלון.
+**חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי. אם
+טיקר חסר בתשובה של FMP — מסומן כ-"לא נמצא" (לא retry). שגיאה 429
+(rate limit) מקבלת backoff חזק יותר (20s, 40s, 80s). שורות שגיאה בלוג:
+* `fmp historical [NASDAQ]: ...` או `fmp historical [NYSE]: ...` —
+  כשל בקריאה של batch שלם של עד 3 טיקרים.
+* `fmp historical: symbol absent from batch response` — FMP החזיר תשובה
+  תקפה אבל הטיקר הספציפי לא בה (סביר ADR / טיקר חדש מאוד).
+* `fmp quote: symbol absent from batch response` — אותו דבר ל-quote.
+* `fmp quote: no positive marketCap` — FMP מכיר את הטיקר אבל לא מפרסם
+  שווי שוק לטיקר הספציפי.
+* `fmp rate-limited after N attempts: ...` — חרגנו מ-5 קריאות/דקה.
+  אם זה קורה הרבה, העלה את `history_sleep_ms` ל-15000.
+* `fmp error after N attempts: HTTPError: ...` — שגיאת רשת אחרת אחרי
+  כל הניסיונות.
+* `missing/NaN OHLCV (first missing date ...)` — FMP החזיר נתונים אבל
+  חסרים ימים בתוך החלון.
 * `market cap $... below $1,000,000,000` — דחייה לגיטימית של small-cap.
 
-**סינון מקדים של non-stocks:** ה-parser דוחה אוטומטית (לפני שליחת הקריאה
-לרשת) טיקרים שלפי השם הם preferred shares / debentures / subordinated
-notes / trust preferred. דוגמאות שייפלו כבר ב-parse:
-`AFGB` (Subordinated Debentures), `BEPH` (Preferred Limited Partnership
-Units), `AIZN` (Subordinated Notes). זה חוסך אלפי קריאות. בלוג תראה
-שורות כמו:
-```
-Phase A: dropped 1543 preferred/debenture/note entries from NYSE-proper list
-  (matched Security Name pattern).
-```
 **`test_tickers`** מאפשר לבדוק את המערכת על מספר מצומצם של מניות לפני
 ריצה מלאה. לדוגמה:
 ```yaml
-  test_tickers: "AAPL,MSFT,NVDA,SPY"
+  test_tickers: "AAPL,MSFT,NVDA,BRK-B"
 ```
-כדי להפעיל סריקה על **כל המניות** של NYSE+NASDAQ, השאר את הערך ריק:
+כדי להפעיל סריקה על **כל מניות ה-S&P 500**, השאר את הערך ריק:
 ```yaml
   test_tickers: ""
 ```
@@ -153,10 +148,10 @@ python main.py
 ```
 
 זהו. הריצה תארך:
-- עם `test_tickers` של 5-10 מניות: 20-30 שניות (Phase A + 5-10
-  קריאות Finnhub).
-- ריצה מלאה (~3,900 מניות): **2-2.5 שעות** — שווי המחיר של ה-free
-  tier של Finnhub (60 קריאות/דקה × 2 קריאות לטיקר).
+- עם `test_tickers` של 5-10 מניות: ~30 שניות (Phase A + 2-3 קריאות
+  FMP).
+- ריצה מלאה (~503 מניות S&P 500): **~35 דקות** — מותחם ע"י ה-5
+  קריאות/דקה של FMP free tier (~180 קריאות סה"כ).
 
 במהלך הריצה תראה במסך התקדמות שלב אחר שלב, כולל מספר מניות שעברו /
 נדחו בכל שלב. בסיום תיווצר קובץ CSV חדש בתיקיית `output/` ויישלחו

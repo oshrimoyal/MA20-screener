@@ -20,31 +20,32 @@ runtime:
   # email; SEC will return 403 if you keep a generic value.
   sec_user_agent: "MA20-Screener replace-me@example.com"
 
-  # ---- Finnhub (Phase B OHLCV + marketCap) ----
-  # Register free at https://finnhub.io/register and copy the API key
-  # from your dashboard into the line below. Free tier = 60 calls/min,
-  # 30 calls/sec hard cap. Each ticker uses 2 calls (candle + profile),
-  # so the full ~3,930-ticker universe takes ~2-2.5 hours per run.
-  finnhub_api_key: "PUT-YOUR-FINNHUB-API-KEY-HERE"
+  # ---- FMP (Phase B OHLCV + marketCap) ----
+  # Register free at https://site.financialmodelingprep.com/register and
+  # copy the API key from your dashboard into the line below. Free tier
+  # = 250 calls/day and 5 calls/min. The S&P 500 universe (~503 tickers)
+  # consumes ~180 calls/run, so plan on a single run per UTC-day.
+  fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
   # ---- Phase B concurrency profile ----
-  # Defaults below stay safely under Finnhub's 60-calls/minute free
-  # tier (workers=1 + 1100ms sleep -> ~0.9 calls/sec sustained).
-  # If you upgrade to a paid Finnhub plan you can raise these.
+  # FMP free is 5 calls/min. The batch loop is single-worker and waits
+  # 12500ms between calls -> ~4.8 calls/min sustained, safely under the
+  # ceiling. If you upgrade to FMP Starter or higher you can drop
+  # history_sleep_ms to 200-500 to take advantage of 300+ calls/min.
   history_workers: 1
-  history_sleep_ms: 1100
-  # Retry policy. Generic transient errors back off 10s, 20s, 40s.
-  # HTTP 429 (rate limited) backs off harder (20s, 40s, 80s) since
-  # Finnhub's rate-limit window is 60 seconds.
+  history_sleep_ms: 12500
+  # Retry policy. Generic transient errors back off 15s, 30s, 60s.
+  # HTTP 429 (rate limited) backs off harder (20s, 40s, 80s) since the
+  # FMP rate-limit window is 60 seconds.
   history_retries: 3
-  history_retry_delay_s: 10
+  history_retry_delay_s: 15
 
   # ---- Universe / validation ----
   # Minimum market capitalization threshold in USD. Read directly from
-  # Finnhub's /stock/profile2.marketCapitalization (millions USD x 1e6).
+  # FMP's /quote.marketCap.
   min_market_cap_usd: 1000000000
   # Number of trading days of OHLCV history required.
   history_trading_days: 60
   # Optional: limit Phase A to this comma-separated list of tickers (testing).
-  # Leave empty for a full universe scan.
+  # Leave empty for a full S&P 500 scan.
   test_tickers: ""
