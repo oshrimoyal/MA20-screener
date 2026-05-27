@@ -22,9 +22,11 @@ class PathsConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    # Phase B (FMP free tier) concurrency profile. FMP free is 250
-    # calls/day and 5 calls/minute. The batch loop runs single-worker
-    # with sleep_ms=12500 to stay under the per-minute ceiling.
+    # Phase B (FMP Starter tier) concurrency profile. Starter is 300
+    # calls/minute with no daily cap. Two calls per ticker (historical
+    # + quote) × ~503 S&P 500 tickers = ~1,006 calls per run. The
+    # defaults below (workers=1, sleep_ms=250) yield ~4 calls/sec
+    # = ~240/min, safely under the 300/min ceiling.
     history_workers: int
     history_sleep_ms: int
     history_retries: int          # attempts AFTER the first try
@@ -39,8 +41,11 @@ class RuntimeConfig:
     # company_tickers_exchange.json for the authoritative exchange
     # label of each S&P 500 ticker.
     sec_user_agent: str
-    # FMP API key (free tier: https://site.financialmodelingprep.com/register).
-    # Validated by `load_config` to reject the placeholder.
+    # FMP API key (Starter tier or higher — Basic free tier does NOT
+    # work because /stable/historical-price-eod/full silently returns
+    # [] for multi-symbol input and /stable/quote single-symbol is
+    # available, but the call budget of 250/day cannot cover 1,006
+    # calls per run). Validated by `load_config`.
     fmp_api_key: str
 
 
@@ -111,9 +116,9 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
 
     runtime = RuntimeConfig(
         history_workers=int(rt_raw.get("history_workers", 1)),
-        history_sleep_ms=int(rt_raw.get("history_sleep_ms", 12500)),
+        history_sleep_ms=int(rt_raw.get("history_sleep_ms", 250)),
         history_retries=int(rt_raw.get("history_retries", 3)),
-        history_retry_delay_s=float(rt_raw.get("history_retry_delay_s", 15.0)),
+        history_retry_delay_s=float(rt_raw.get("history_retry_delay_s", 5.0)),
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
         test_tickers=test_tickers,

@@ -21,24 +21,24 @@ runtime:
   sec_user_agent: "MA20-Screener replace-me@example.com"
 
   # ---- FMP (Phase B OHLCV + marketCap) ----
-  # Register free at https://site.financialmodelingprep.com/register and
-  # copy the API key from your dashboard into the line below. Free tier
-  # = 250 calls/day and 5 calls/min. The S&P 500 universe (~503 tickers)
-  # consumes ~180 calls/run, so plan on a single run per UTC-day.
+  # Requires the FMP Starter plan (or higher) — Basic free is too
+  # constrained for the S&P 500 universe. Register and subscribe at
+  # https://site.financialmodelingprep.com/pricing-plans, then paste
+  # the API key from your dashboard below. Starter = 300 calls/min,
+  # no daily cap. Each ticker uses two calls (historical + quote), so
+  # a full S&P 500 run is ~1,006 calls = ~3-4 minutes.
   fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
   # ---- Phase B concurrency profile ----
-  # FMP free is 5 calls/min. The batch loop is single-worker and waits
-  # 12500ms between calls -> ~4.8 calls/min sustained, safely under the
-  # ceiling. If you upgrade to FMP Starter or higher you can drop
-  # history_sleep_ms to 200-500 to take advantage of 300+ calls/min.
+  # Defaults yield ~4 calls/sec = ~240 calls/min, safely under the
+  # Starter 300/min ceiling. Raise history_workers (or lower
+  # history_sleep_ms) if you upgrade to Premium / Ultimate.
   history_workers: 1
-  history_sleep_ms: 12500
-  # Retry policy. Generic transient errors back off 15s, 30s, 60s.
-  # HTTP 429 (rate limited) backs off harder (20s, 40s, 80s) since the
-  # FMP rate-limit window is 60 seconds.
+  history_sleep_ms: 250
+  # Retry policy. Generic transient errors back off 5s, 10s, 20s.
+  # HTTP 429 (rate limited) backs off harder (10s, 20s, 40s).
   history_retries: 3
-  history_retry_delay_s: 15
+  history_retry_delay_s: 5
 
   # ---- Universe / validation ----
   # Minimum market capitalization threshold in USD. Read directly from

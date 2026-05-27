@@ -14,10 +14,8 @@ American / NYSE Arca are no longer pulled.
 After the Wikipedia parse, every ticker is enriched with the
 authoritative SEC EDGAR exchange label from
 `company_tickers_exchange.json`. This is a single static-file download
-and adds no per-ticker round-trips. The exchange label feeds two
-things downstream: the Stage-4 TradingView link, and Phase B's
-same-exchange grouping (FMP's /historical-price-full requires symbols
-in a single batch to share an exchange).
+and adds no per-ticker round-trips. The exchange label feeds the
+Stage-4 TradingView link (NASDAQ vs NYSE prefix).
 
 The marketCap >=$1B filter lives in Phase B (read directly from FMP's
 /quote.marketCap).

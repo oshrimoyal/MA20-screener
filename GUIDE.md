@@ -75,54 +75,54 @@ runtime:
   sec_user_agent: "MA20-Screener your-email@example.com"
 
   # FMP — Phase B (OHLCV + שווי שוק).
-  # הירשם חינם ב-https://site.financialmodelingprep.com/register,
-  # העתק את ה-API key מה-dashboard ושים אותו בשורה הבאה.
-  # ה-free tier הוא 250 קריאות/יום ו-5 קריאות/דקה.
+  # דורש את חבילת FMP Starter (או יותר). הירשם ב-
+  # https://site.financialmodelingprep.com/pricing-plans, רכוש Starter,
+  # והעתק את ה-API key מה-dashboard לשורה הבאה.
+  # Starter = 300 קריאות/דקה, ללא תקרת יום.
   fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
-  # Phase B — concurrency profile (תואם ל-FMP free tier)
+  # Phase B — concurrency profile (תואם ל-FMP Starter tier)
   history_workers: 1
-  history_sleep_ms: 12500
+  history_sleep_ms: 250
   history_retries: 3              # ניסיונות נוספים על כשלי רשת
-  history_retry_delay_s: 15       # השהיה התחלתית לשגיאות גנריות
+  history_retry_delay_s: 5        # השהיה התחלתית לשגיאות גנריות
 
   min_market_cap_usd: 1000000000  # סף שווי שוק = 1 מיליארד דולר
   history_trading_days: 60        # חלון היסטוריה = 60 ימי מסחר
   test_tickers: ""                # סריקה חלקית לבדיקה — ראה למטה
 ```
 
-**מקורות הנתונים:** המערכת משתמשת בשני מקורות חינמיים בלבד:
+**מקורות הנתונים:** המערכת משתמשת בשני מקורות:
 
 1. **Wikipedia + SEC EDGAR** — רשימת מניות ה-S&P 500 ותוויות בורסה
-   (NYSE/NASDAQ) לכל טיקר. ללא API key.
-2. **FMP (Financial Modeling Prep)** — שני endpoints, שניהם מקובצים
-   (batch) כדי לחסוך קריאות:
-   * `/historical-price-full` — OHLCV יומי, עד **3 טיקרים בקריאה אחת**
-     (FMP מחייב שכל הטיקרים יהיו מאותה בורסה).
-   * `/quote` — שווי שוק (`marketCap`) ל-50 טיקרים בקריאה אחת.
+   (NYSE/NASDAQ) לכל טיקר. ללא API key, ללא תשלום.
+2. **FMP (Financial Modeling Prep) Starter** — שני endpoints,
+   single-symbol בלבד (FMP free tier אינו מספק batch ל-users שנרשמו
+   אחרי 31 באוגוסט 2025):
+   * `/stable/historical-price-eod/full?symbol=X` — OHLCV יומי לטיקר
+     בודד.
+   * `/stable/quote?symbol=X` — שווי שוק (`marketCap`) לטיקר בודד.
 
-   דורש signup חד-פעמי באתר FMP והעתקת API key. ה-free tier הוא 250
-   קריאות/יום ו-5 קריאות/דקה — כלומר ריצה מלאה (~503 טיקרים) צורכת
-   כ-180 קריאות וכמעט ~35 דקות. **מומלץ ריצה אחת ביום (UTC) — מעבר
-   ל-250 קריאות תיחסם עד חצות UTC.**
+   דורש מנוי FMP Starter (~$19/חודש ב-billing שנתי). Starter = 300
+   קריאות/דקה ללא תקרת יום. כל טיקר צורך 2 קריאות, כך שריצה מלאה של
+   S&P 500 (~503 טיקרים) = ~1,006 קריאות = **~3-4 דקות**.
 
 **חישוב שווי שוק:** `שווי שוק = quote.marketCap של FMP` (כבר ב-USD,
 ללא צורך בכפל).
 
 **חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי. אם
-טיקר חסר בתשובה של FMP — מסומן כ-"לא נמצא" (לא retry). שגיאה 429
-(rate limit) מקבלת backoff חזק יותר (20s, 40s, 80s). שורות שגיאה בלוג:
-* `fmp historical [NASDAQ]: ...` או `fmp historical [NYSE]: ...` —
-  כשל בקריאה של batch שלם של עד 3 טיקרים.
-* `fmp historical: symbol absent from batch response` — FMP החזיר תשובה
-  תקפה אבל הטיקר הספציפי לא בה (סביר ADR / טיקר חדש מאוד).
-* `fmp quote: symbol absent from batch response` — אותו דבר ל-quote.
-* `fmp quote: no positive marketCap` — FMP מכיר את הטיקר אבל לא מפרסם
-  שווי שוק לטיקר הספציפי.
-* `fmp rate-limited after N attempts: ...` — חרגנו מ-5 קריאות/דקה.
-  אם זה קורה הרבה, העלה את `history_sleep_ms` ל-15000.
-* `fmp error after N attempts: HTTPError: ...` — שגיאת רשת אחרת אחרי
-  כל הניסיונות.
+טיקר חסר ב-FMP — מסומן כ-"לא נמצא" (לא retry). שגיאה 429 (rate limit)
+מקבלת backoff נפרד (10s, 20s, 40s). שורות שגיאה בלוג:
+* `fmp historical: FMP returned no historical rows for ...` — FMP לא
+  מכיר את הטיקר או שאין נתונים בחלון 60 הימים.
+* `fmp quote: FMP /quote returned empty payload for ...` — FMP לא
+  מכיר את הטיקר.
+* `fmp quote: FMP /quote has no positive marketCap for ...` — FMP
+  מכיר את הטיקר אבל לא מפרסם שווי שוק (נדיר).
+* `fmp historical rate-limited after N attempts: ...` — חרגנו מ-300
+  קריאות/דקה. אם זה קורה הרבה, העלה את `history_sleep_ms` ל-300-500.
+* `fmp historical error after N attempts: HTTPError: ...` — שגיאת
+  רשת אחרת אחרי כל הניסיונות.
 * `missing/NaN OHLCV (first missing date ...)` — FMP החזיר נתונים אבל
   חסרים ימים בתוך החלון.
 * `market cap $... below $1,000,000,000` — דחייה לגיטימית של small-cap.
@@ -148,10 +148,10 @@ python main.py
 ```
 
 זהו. הריצה תארך:
-- עם `test_tickers` של 5-10 מניות: ~30 שניות (Phase A + 2-3 קריאות
+- עם `test_tickers` של 5-10 מניות: ~10 שניות (Phase A + 10-20 קריאות
   FMP).
-- ריצה מלאה (~503 מניות S&P 500): **~35 דקות** — מותחם ע"י ה-5
-  קריאות/דקה של FMP free tier (~180 קריאות סה"כ).
+- ריצה מלאה (~503 מניות S&P 500): **~3-4 דקות** — מותחם ע"י ה-300
+  קריאות/דקה של FMP Starter (~1,006 קריאות סה"כ).
 
 במהלך הריצה תראה במסך התקדמות שלב אחר שלב, כולל מספר מניות שעברו /
 נדחו בכל שלב. בסיום תיווצר קובץ CSV חדש בתיקיית `output/` ויישלחו

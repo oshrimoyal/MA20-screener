@@ -1,51 +1,50 @@
-"""Financial Modeling Prep (FMP) free-tier wrapper.
+"""Financial Modeling Prep (FMP) /stable wrapper for the Starter plan.
 
-FMP's free Basic plan offers two endpoints relevant to the screener:
+FMP retired the legacy `/api/v3/...` endpoints for users who joined
+after 31 Aug 2025; all new subscribers must use the `/stable/...`
+namespace. Empirically (verified against the operator's live Starter
+key), the `/stable` endpoints accept ONE symbol per call. Multi-symbol
+comma-separated input on `/stable/historical-price-eod/full` is
+silently dropped (returns `[]`); `/stable/batch-quote` is a Premium-tier
+endpoint not included in Starter. So this wrapper exposes two
+single-symbol functions and lets Phase B iterate at the Starter rate
+limit (300 calls/min).
 
-  * /api/v3/historical-price-full/{symbols}?from=&to=
-        Daily OHLCV. Accepts 1-3 comma-separated symbols per call
-        (FMP's documented batch ceiling), all from the same exchange.
+Endpoints:
+  * /stable/historical-price-eod/full?symbol=AAPL&from=&to=
+        Daily OHLCV. Returns a flat array of row dicts: one per
+        trading day, each with {symbol, date, open, high, low, close,
+        volume, ...}. Empty array if Starter does not include the
+        symbol or the date range has no data.
 
-  * /api/v3/quote/{symbols}
-        Real-time quote with `marketCap`. Accepts a comma-separated
-        list; the wrapper defaults to batches of 50 symbols.
-
-Free-tier limits: 250 calls/day and 5 calls/minute. Phase B paces the
-batch loop at ~12.5 s/call to stay safely under the per-minute cap.
+  * /stable/quote?symbol=AAPL
+        Real-time quote. Returns an array of length 1 (or 0 if the
+        symbol is unknown), where the single element carries
+        marketCap (USD, not millions), price, exchange, etc.
 
 Auth via the `apikey` query parameter. Ticker normalisation: internal
 form uses '-' for class shares (BRK-B); FMP uses '.' (BRK.B). The
-wrapper converts at the URL boundary and converts back when keying
-the returned dicts so callers always see the internal form.
+wrapper converts at the URL boundary.
 """
 from __future__ import annotations
 
 import pandas as pd
 import requests
 
-HISTORICAL_URL_FMT = (
-    "https://financialmodelingprep.com/api/v3/historical-price-full/{symbols}"
+HISTORICAL_URL = (
+    "https://financialmodelingprep.com/stable/historical-price-eod/full"
 )
-QUOTE_URL_FMT = "https://financialmodelingprep.com/api/v3/quote/{symbols}"
+QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
 
 OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
-# FMP-documented hard ceiling for /historical-price-full batching.
-HISTORICAL_BATCH_MAX = 3
-# Conservative ceiling for /quote — FMP does not document an upper
-# bound, so we cap to keep URLs short and predictable.
-QUOTE_BATCH_MAX = 50
-
 
 class FMPNotFound(Exception):
-    """FMP returned a clean response that does not contain the
-    requested symbol (or contains no historical rows). Treat as a
-    permanent answer — do NOT retry."""
+    """FMP returned an empty payload for this symbol. Permanent — do NOT retry."""
 
 
 class FMPRateLimited(Exception):
-    """FMP returned HTTP 429. Retryable, but back off harder than for
-    generic transient errors since the free-tier window is 60s."""
+    """FMP returned HTTP 429. Retryable; the rate-limit window is short."""
 
 
 def _to_fmp_symbol(ticker: str) -> str:
@@ -53,26 +52,19 @@ def _to_fmp_symbol(ticker: str) -> str:
     return ticker.upper().strip().replace("-", ".")
 
 
-def _from_fmp_symbol(symbol: str) -> str:
-    """FMP 'BRK.B' -> internal 'BRK-B'."""
-    return symbol.upper().strip().replace(".", "-")
-
-
-def _normalise_historical_rows(rows: list[dict]) -> pd.DataFrame:
-    """Convert FMP's `historical` array (list of {date, open, high,
-    low, close, volume, ...} dicts) into a DataFrame indexed by date
-    (normalised, no tz) with float OHLCV columns. Returns an empty
-    DataFrame if `rows` is empty."""
+def _normalise_historical_rows(rows: list[dict], ticker: str) -> pd.DataFrame:
+    """Convert a flat row list into a DataFrame indexed by date
+    (normalised, no tz) with float OHLCV columns. Raises FMPNotFound
+    if the rows are missing required fields."""
     if not rows:
-        return pd.DataFrame(columns=OHLCV_COLS)
+        raise FMPNotFound(f"FMP returned no historical rows for {ticker!r}")
     df = pd.DataFrame(rows)
     if "date" not in df.columns:
-        raise FMPNotFound("FMP historical row is missing the 'date' field")
+        raise FMPNotFound(f"FMP historical row missing 'date' for {ticker!r}")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).set_index("date")
     df.index = df.index.normalize()
     df.index.name = None
-    # FMP uses lowercase column names; rename to canonical OHLCV.
     rename_map = {
         "open": "Open", "high": "High", "low": "Low",
         "close": "Close", "volume": "Volume",
@@ -80,131 +72,99 @@ def _normalise_historical_rows(rows: list[dict]) -> pd.DataFrame:
     df = df.rename(columns=rename_map)
     missing = [c for c in OHLCV_COLS if c not in df.columns]
     if missing:
-        raise FMPNotFound(f"FMP historical batch missing columns: {missing}")
+        raise FMPNotFound(
+            f"FMP historical for {ticker!r} missing columns: {missing}"
+        )
     return df[OHLCV_COLS].astype(float).sort_index()
 
 
-def fetch_historical_prices_batch(
-    symbols: list[str],
+def fetch_historical_prices(
+    ticker: str,
     api_key: str,
     from_date: str,
     to_date: str,
     timeout: int = 30,
-) -> dict[str, pd.DataFrame]:
-    """Fetch daily OHLCV for 1-3 symbols in one call.
+) -> pd.DataFrame:
+    """Fetch daily OHLCV between `from_date` and `to_date` (YYYY-MM-DD)
+    for ONE symbol.
 
-    Returns a dict keyed by INTERNAL ticker form (with '-'). Symbols
-    absent from the response are absent from the dict — the caller
-    treats them as "FMP did not return data" without raising.
+    Returns a DataFrame indexed by date (normalised, no tz) with float
+    OHLCV columns.
 
     Raises:
+      * FMPNotFound — empty payload (symbol unknown or no data in
+        the window).
       * FMPRateLimited — HTTP 429.
-      * FMPNotFound    — payload structure is unrecognised.
       * requests.HTTPError — any other non-2xx response.
     """
-    if not symbols:
-        return {}
-    if len(symbols) > HISTORICAL_BATCH_MAX:
-        raise ValueError(
-            f"fetch_historical_prices_batch accepts at most "
-            f"{HISTORICAL_BATCH_MAX} symbols per call; got {len(symbols)}."
-        )
+    if not ticker:
+        raise ValueError("ticker must be non-empty")
     if not api_key:
         raise ValueError("api_key must be non-empty")
 
-    fmp_symbols = [_to_fmp_symbol(s) for s in symbols]
-    url = HISTORICAL_URL_FMT.format(symbols=",".join(fmp_symbols))
-    params = {"from": from_date, "to": to_date, "apikey": api_key}
-    resp = requests.get(url, params=params, timeout=timeout)
+    params = {
+        "symbol": _to_fmp_symbol(ticker),
+        "from": from_date,
+        "to": to_date,
+        "apikey": api_key,
+    }
+    resp = requests.get(HISTORICAL_URL, params=params, timeout=timeout)
     if resp.status_code == 429:
         raise FMPRateLimited(
-            f"FMP rate-limited /historical-price-full for {symbols!r}"
+            f"FMP rate-limited /historical-price-eod/full for {ticker!r}"
         )
     resp.raise_for_status()
     payload = resp.json()
-
-    # Single-symbol response: {"symbol": "...", "historical": [...]}
-    # Multi-symbol response:  {"historicalStockList": [{"symbol": "...", "historical": [...]}, ...]}
-    # Empty response: [] (FMP returns an empty array if no data at all)
-    out: dict[str, pd.DataFrame] = {}
-    if isinstance(payload, list):
-        # No data returned for any symbol. Treat each requested symbol
-        # as absent (caller will log accordingly).
-        return out
-    if not isinstance(payload, dict):
+    if not isinstance(payload, list):
         raise FMPNotFound(
-            f"FMP /historical-price-full returned unexpected type "
-            f"{type(payload).__name__} for {symbols!r}"
+            f"FMP /historical-price-eod/full returned unexpected type "
+            f"{type(payload).__name__} for {ticker!r}"
         )
-
-    if "historicalStockList" in payload:
-        entries = payload.get("historicalStockList") or []
-    else:
-        entries = [payload]
-
-    for entry in entries:
-        sym_raw = entry.get("symbol")
-        hist = entry.get("historical")
-        if not sym_raw or not hist:
-            continue
-        try:
-            df = _normalise_historical_rows(hist)
-        except FMPNotFound:
-            continue
-        if df.empty:
-            continue
-        out[_from_fmp_symbol(str(sym_raw))] = df
-
-    return out
+    return _normalise_historical_rows(payload, ticker)
 
 
-def fetch_quotes_batch(
-    symbols: list[str],
+def fetch_quote(
+    ticker: str,
     api_key: str,
     timeout: int = 30,
-) -> dict[str, dict]:
-    """Fetch current quotes (including `marketCap`) for up to
-    QUOTE_BATCH_MAX symbols in one call.
+) -> dict:
+    """Fetch the current quote (including `marketCap` in USD) for ONE
+    symbol.
 
-    Returns a dict keyed by INTERNAL ticker form (with '-'). Symbols
-    absent from the response are absent from the dict.
+    Returns the raw quote payload (a dict).
 
     Raises:
+      * FMPNotFound — payload is empty, symbol absent, or marketCap
+        is missing / non-positive.
       * FMPRateLimited — HTTP 429.
-      * FMPNotFound    — payload structure is unrecognised.
       * requests.HTTPError — any other non-2xx response.
     """
-    if not symbols:
-        return {}
-    if len(symbols) > QUOTE_BATCH_MAX:
-        raise ValueError(
-            f"fetch_quotes_batch accepts at most {QUOTE_BATCH_MAX} "
-            f"symbols per call; got {len(symbols)}."
-        )
+    if not ticker:
+        raise ValueError("ticker must be non-empty")
     if not api_key:
         raise ValueError("api_key must be non-empty")
 
-    fmp_symbols = [_to_fmp_symbol(s) for s in symbols]
-    url = QUOTE_URL_FMT.format(symbols=",".join(fmp_symbols))
-    params = {"apikey": api_key}
-    resp = requests.get(url, params=params, timeout=timeout)
+    params = {"symbol": _to_fmp_symbol(ticker), "apikey": api_key}
+    resp = requests.get(QUOTE_URL, params=params, timeout=timeout)
     if resp.status_code == 429:
-        raise FMPRateLimited(f"FMP rate-limited /quote for {symbols!r}")
+        raise FMPRateLimited(f"FMP rate-limited /quote for {ticker!r}")
     resp.raise_for_status()
     payload = resp.json()
-
-    if not isinstance(payload, list):
+    if not isinstance(payload, list) or not payload:
+        raise FMPNotFound(f"FMP /quote returned empty payload for {ticker!r}")
+    entry = payload[0]
+    if not isinstance(entry, dict):
         raise FMPNotFound(
-            f"FMP /quote returned unexpected type "
-            f"{type(payload).__name__} for {symbols!r}"
+            f"FMP /quote returned non-dict entry for {ticker!r}: "
+            f"{type(entry).__name__}"
         )
-
-    out: dict[str, dict] = {}
-    for entry in payload:
-        if not isinstance(entry, dict):
-            continue
-        sym_raw = entry.get("symbol")
-        if not sym_raw:
-            continue
-        out[_from_fmp_symbol(str(sym_raw))] = entry
-    return out
+    mc_raw = entry.get("marketCap")
+    try:
+        mc = float(mc_raw) if mc_raw is not None else 0.0
+    except (TypeError, ValueError):
+        mc = 0.0
+    if mc <= 0:
+        raise FMPNotFound(
+            f"FMP /quote has no positive marketCap for {ticker!r}"
+        )
+    return entry
