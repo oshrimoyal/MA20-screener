@@ -44,13 +44,13 @@ Universe sources:
   yfinance round-trips that those symbols would otherwise consume in
   the marketCap lookup.
 
-The marketCap lookup itself uses a bounded retry with exponential
-backoff (see `_get_market_cap_and_exchange_with_retry`). When every
-attempt raises, the per-ticker log line includes the exception type
-and message (typical: `YFRateLimitError`, `JSONDecodeError`,
-`HTTPError`) instead of the generic "market cap unavailable" — so the
-operator can distinguish a genuine missing-marketCap (Yahoo answered
-cleanly) from a rate-limit hit (Yahoo refused).
+The marketCap lookup is a single yfinance.fast_info call per ticker
+— no retry. Under broad Yahoo rate-limiting, retry only multiplies
+the runtime without recovering tickers. The exception type and
+message are still surfaced in the per-ticker log line (typical:
+`YFRateLimitError`, `JSONDecodeError`, `HTTPError`) so the operator
+can distinguish a genuine missing-marketCap (Yahoo answered cleanly)
+from a rate-limit hit (Yahoo refused).
 
   The four lists are merged and deduplicated by ticker; an entry
   that appears in more than one source is included exactly once.
@@ -72,7 +72,6 @@ the TradingView link used in Stage 4.
 from __future__ import annotations
 
 import io
-import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -461,64 +460,44 @@ def fetch_nasdaq_q_stocks() -> list[Symbol]:
 
 # ----- yfinance lookup -----------------------------------------------------
 
-def _fast_info_once(ticker: str) -> tuple[Optional[float], Optional[str]]:
-    """One yfinance.fast_info round-trip. Returns (marketCap_or_None,
-    exchange_code_or_None). Raises any underlying yfinance exception so
-    the retry loop can react."""
-    fi = yf.Ticker(ticker).fast_info
-    mc = fi.get("marketCap") if hasattr(fi, "get") else None
-    ex = fi.get("exchange") if hasattr(fi, "get") else None
-    ex_str = str(ex).strip() if ex is not None else None
-    if mc is None:
-        return None, ex_str
-    mc_f = float(mc)
-    if mc_f <= 0:
-        return None, ex_str
-    return mc_f, ex_str
-
-
-def _get_market_cap_and_exchange_with_retry(
+def _get_market_cap_and_exchange(
     ticker: str,
-    retries: int,
-    retry_delay_s: float,
 ) -> tuple[Optional[float], Optional[str], Optional[str]]:
-    """Fetch marketCap + exchange code with bounded retry on exception.
-
-    Returns a triple `(market_cap, exchange_code, error_reason)`:
-      * (mc_float, exch_str, None)  — success, marketCap is valid.
+    """One yfinance.fast_info round-trip. Returns a triple
+    `(market_cap, exchange_code, error_reason)`:
+      * (mc_float, exch_str, None)  — success.
       * (None,    exch_str, None)   — Yahoo answered cleanly but had no
-                                       marketCap for this ticker (typical
-                                       for preferred shares / bonds /
-                                       ADRs that yfinance does not cover).
-                                       NOT a rate-limit / transient error.
-      * (None,    None,     reason) — every attempt raised an exception.
+                                       marketCap for this ticker
+                                       (typical for preferred shares /
+                                       bonds / ADRs that yfinance does
+                                       not cover). NOT a transient
+                                       error.
+      * (None,    None,     reason) — yfinance raised an exception.
                                        `reason` includes the exception
-                                       type+message of the last attempt,
-                                       so the operator can see whether
-                                       Yahoo returned YFRateLimitError,
-                                       JSONDecodeError, HTTPError, etc.
+                                       type+message (typical: Yahoo
+                                       throws YFRateLimitError when
+                                       the IP is throttled).
 
-    `retries` is the number of additional attempts after the first try.
-    `retry_delay_s` is the initial sleep between attempts; it doubles
-    between successive retries (exponential backoff).
+    No retry: experience has shown that under broad Yahoo rate-limiting
+    (which happens when the IP has run many fetches recently) retry
+    only multiplies the runtime without recovering the ticker. The
+    pre-parse Security-Name / suffix / '$' filters already eliminate
+    the bulk of wasted round-trips. Phase B keeps its retry profile
+    because the chart endpoint behaves differently.
     """
-    last_exc: Exception | None = None
-    delay = retry_delay_s
-    total_attempts = max(1, retries + 1)
-    for attempt in range(total_attempts):
-        try:
-            mc, ex = _fast_info_once(ticker)
-            return mc, ex, None
-        except Exception as e:
-            last_exc = e
-            if attempt < total_attempts - 1:
-                time.sleep(delay)
-                delay *= 2.0
-    reason = (
-        f"yfinance error after {total_attempts} attempts: "
-        f"{type(last_exc).__name__}: {last_exc}"
-    )
-    return None, None, reason
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        mc = fi.get("marketCap") if hasattr(fi, "get") else None
+        ex = fi.get("exchange") if hasattr(fi, "get") else None
+        ex_str = str(ex).strip() if ex is not None else None
+        if mc is None:
+            return None, ex_str, None
+        mc_f = float(mc)
+        if mc_f <= 0:
+            return None, ex_str, None
+        return mc_f, ex_str, None
+    except Exception as e:
+        return None, None, f"yfinance error: {type(e).__name__}: {e}"
 
 
 def _label_for_exchange(code: Optional[str]) -> str:
@@ -579,19 +558,18 @@ def run_phase_a(
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
     test_tickers: list[str] | None = None,
-    marketcap_retries: int = 2,
-    marketcap_retry_delay_s: float = 2.0,
 ) -> list[UniverseEntry]:
     """Execute Phase A end-to-end:
        1. Build the universe = S&P 500 ∪ NYSE-proper ∪ NASDAQ-Global-
           Select ∪ NYSE-American stocks (or use test_tickers).
-       2. Look up market cap + listing exchange for each via yfinance,
-          with bounded retry on yfinance exceptions.
+       2. Look up market cap + listing exchange for each via yfinance.
        3. Keep only tickers with market cap >= min_market_cap_usd.
 
-    `marketcap_retries` is the number of additional attempts after the
-    first yfinance call fails; `marketcap_retry_delay_s` is the initial
-    backoff (it doubles between successive retries).
+    Phase A does NOT retry on yfinance errors: when Yahoo broadly
+    rate-limits the IP, retrying multiplies the runtime without
+    recovering tickers. yfinance exceptions are surfaced in the
+    per-ticker log line so the operator can see the actual cause
+    (YFRateLimitError, JSONDecodeError, ...).
     """
     log = get_logger()
     log_stage_start(
@@ -605,17 +583,12 @@ def run_phase_a(
         symbols = fetch_universe()
 
     def _lookup(sym: Symbol) -> tuple[Symbol, Optional[float], Optional[str], Optional[str]]:
-        mc, ex, err = _get_market_cap_and_exchange_with_retry(
-            sym.ticker,
-            retries=marketcap_retries,
-            retry_delay_s=marketcap_retry_delay_s,
-        )
+        mc, ex, err = _get_market_cap_and_exchange(sym.ticker)
         return sym, mc, ex, err
 
     log.info(
         f"Phase A: looking up market cap + exchange for {len(symbols)} tickers "
-        f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
-        f"retries={marketcap_retries}, retry_delay_s={marketcap_retry_delay_s})…"
+        f"(workers={workers}, sleep_ms={fetch_sleep_ms})…"
     )
     quads = parallel_map(_lookup, symbols, workers=workers, sleep_ms=fetch_sleep_ms)
 

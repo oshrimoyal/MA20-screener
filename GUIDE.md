@@ -69,10 +69,9 @@ paths:
 ```yaml
 runtime:
   # שלב Phase A — שליפת שווי שוק (endpoint quote, רגיש פחות)
+  # ללא retry: כש-Yahoo חוסם רחב, retry רק מאריך ריצה בלי לעזור
   workers: 10
   fetch_sleep_ms: 100
-  marketcap_retries: 2            # ניסיונות נוספים על מניות שיאהו דחה
-  marketcap_retry_delay_s: 2      # השהיה התחלתית (מכפילה את עצמה)
 
   # שלב Phase B — שליפת היסטוריית מחירים (endpoint chart, רגיש מאוד)
   history_workers: 3
@@ -85,14 +84,19 @@ runtime:
   test_tickers: ""                # סריקה חלקית לבדיקה — ראה למטה
 ```
 
-**חוסן מול ה-rate-limit של Yahoo:** המערכת מבצעת retry אוטומטי עם backoff
-מעריכי בשני השלבים. אם אתה רואה בלוג שורות כמו
-`FAIL: yfinance error after N attempts: YFRateLimitError`, אלו טיקרים
-שיאהו דחה גם אחרי כל הנסיונות. כדי לצמצם:
+**חוסן מול ה-rate-limit של Yahoo:** Phase B מבצע retry אוטומטי עם
+backoff מעריכי. Phase A דווקא לא — תחת חסימה רחבה של Yahoo, retry
+פשוט מאט את הריצה בלי לעזור (כל כשל יחכה כמה שניות לפני שמוותרים).
+כשל בכל שלב מופיע בלוג עם סוג החריג האמיתי (`YFRateLimitError`,
+`JSONDecodeError`) כדי שתוכל לזהות. אם אתה רואה בלוג הרבה
+`FAIL: yfinance error: YFRateLimitError` ב-Phase B, כדאי לצמצם:
 1. **הורד `history_workers` ל-1** — שולח רק קריאה אחת בכל רגע.
 2. **העלה `history_sleep_ms` ל-1000 או 2000** — נותן ל-Yahoo להתאושש.
 3. **הגדל את ה-retries וה-delays** — `history_retries: 5` ו-
    `history_retry_delay_s: 10` כמעט מובטחים להצליח אבל הריצה תהיה ארוכה.
+
+אם Phase A עצמו זורק הרבה rate-limit, סימן שיאהו חסם את ה-IP. תחכה
+15-30 דקות ותנסה שוב.
 
 **סינון מקדים של non-stocks:** ה-parser דוחה אוטומטית (לפני שליחת הקריאה
 ל-yfinance) טיקרים שלפי השם הם preferred shares / debentures /

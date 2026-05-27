@@ -18,8 +18,6 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
         fetch_sleep_ms=cfg.runtime.fetch_sleep_ms,
         min_market_cap_usd=cfg.runtime.min_market_cap_usd,
         test_tickers=cfg.runtime.test_tickers or None,
-        marketcap_retries=cfg.runtime.marketcap_retries,
-        marketcap_retry_delay_s=cfg.runtime.marketcap_retry_delay_s,
     )
 
     # Phase B uses its OWN, more conservative concurrency profile (the

@@ -23,16 +23,13 @@ class PathsConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     # Phase A (marketCap via yfinance.fast_info — quote endpoint).
+    # No retry: under broad Yahoo rate-limiting, retry only multiplies
+    # the runtime without recovering tickers.
     workers: int
     fetch_sleep_ms: int
-    # Phase A retry profile (recovers transient YFRateLimitError /
-    # JSONDecodeError on legitimate stocks that briefly hit Yahoo's
-    # rate limit).
-    marketcap_retries: int           # attempts AFTER the first try
-    marketcap_retry_delay_s: float   # initial delay, doubles each retry
     # Phase B (OHLCV via yfinance.Ticker.history — chart endpoint).
     # Yahoo's chart endpoint rate-limits aggressively, so Phase B uses
-    # lower concurrency and longer sleeps than Phase A by default.
+    # lower concurrency, longer sleeps, and bounded retry-with-backoff.
     history_workers: int
     history_sleep_ms: int
     history_retries: int          # attempts AFTER the first try
@@ -86,13 +83,7 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
     runtime = RuntimeConfig(
         workers=int(_require(rt_raw, "workers", "runtime")),
         fetch_sleep_ms=int(_require(rt_raw, "fetch_sleep_ms", "runtime")),
-        # Phase A retry profile: 2 retries with 2 s initial delay (so
-        # 2 s, then 4 s) recovers most legitimate stocks that briefly
-        # hit a Yahoo rate-limit on the quote endpoint. fast_info is
-        # less throttled than .history(), hence the lighter profile.
-        marketcap_retries=int(rt_raw.get("marketcap_retries", 2)),
-        marketcap_retry_delay_s=float(rt_raw.get("marketcap_retry_delay_s", 2.0)),
-        # Phase B settings default to an even more conservative profile.
+        # Phase B settings default to a more conservative profile.
         # Yahoo's chart/history endpoint is rate-limited harder, so we
         # use 3 retries with 5 s initial delay (5 s, 10 s, 20 s = up to
         # 35 s of waiting per ticker) to push the success rate above 95 %.
