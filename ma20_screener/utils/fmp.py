@@ -51,11 +51,31 @@ OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
 
 class FMPNotFound(Exception):
-    """FMP returned an empty payload for this symbol. Permanent — do NOT retry."""
+    """FMP returned an empty payload for this symbol OR a permanent
+    4xx that will not change with retries on the current subscription
+    tier (401 / 402 / 403 / 404). Do NOT retry."""
 
 
 class FMPRateLimited(Exception):
     """FMP returned HTTP 429. Retryable; the rate-limit window is short."""
+
+
+# 4xx codes that mean "permanent answer on this tier" — retrying with
+# the same key will not change the result. 402 in particular shows up
+# for individual tickers that are gated behind a higher FMP plan
+# (e.g. BRK.B on Starter).
+_PERMANENT_HTTP_STATUSES = (401, 402, 403, 404)
+
+
+def _raise_for_permanent_status(resp, label: str) -> None:
+    """If the response status is in `_PERMANENT_HTTP_STATUSES`, raise
+    FMPNotFound with a clear reason so the caller's retry loop treats
+    it as permanent (no backoff, no re-attempt)."""
+    if resp.status_code in _PERMANENT_HTTP_STATUSES:
+        raise FMPNotFound(
+            f"FMP {label} returned permanent HTTP {resp.status_code} "
+            f"(likely gated to a higher subscription tier)"
+        )
 
 
 def _to_fmp_symbol(ticker: str) -> str:
@@ -132,6 +152,7 @@ def fetch_company_screener(
     resp = requests.get(SCREENER_URL, params=params, timeout=timeout)
     if resp.status_code == 429:
         raise FMPRateLimited("FMP rate-limited /company-screener")
+    _raise_for_permanent_status(resp, "/company-screener")
     resp.raise_for_status()
     payload = resp.json()
     if not isinstance(payload, list):
@@ -177,6 +198,9 @@ def fetch_historical_prices(
         raise FMPRateLimited(
             f"FMP rate-limited /historical-price-eod/full for {ticker!r}"
         )
+    _raise_for_permanent_status(
+        resp, f"/historical-price-eod/full for {ticker!r}"
+    )
     resp.raise_for_status()
     payload = resp.json()
     if not isinstance(payload, list):
@@ -212,6 +236,7 @@ def fetch_quote(
     resp = requests.get(QUOTE_URL, params=params, timeout=timeout)
     if resp.status_code == 429:
         raise FMPRateLimited(f"FMP rate-limited /quote for {ticker!r}")
+    _raise_for_permanent_status(resp, f"/quote for {ticker!r}")
     resp.raise_for_status()
     payload = resp.json()
     if not isinstance(payload, list) or not payload:
