@@ -68,51 +68,59 @@ paths:
 ### `runtime`
 ```yaml
 runtime:
-  # SEC EDGAR — מקור החובה לחישוב שווי שוק
+  # SEC EDGAR — Phase A (תוויות בורסה NYSE/NASDAQ).
   # SEC דורש אימייל אמיתי בכותרת User-Agent (מדיניות "fair access").
   # החלף את הדוגמה ב-email האמיתי שלך.
   sec_user_agent: "MA20-Screener your-email@example.com"
-  stooq_user_agent: "MA20-Screener your-email@example.com"
 
-  # Phase B — שליפת היסטוריית מחירים מ-Stooq
-  history_workers: 3
-  history_sleep_ms: 500
+  # Finnhub — Phase B (OHLCV + שווי שוק).
+  # הירשם חינם ב-https://finnhub.io/register, העתק את ה-API key
+  # מה-dashboard ושים אותו בשורה הבאה. ה-free tier הוא 60 קריאות/דקה.
+  finnhub_api_key: "PUT-YOUR-FINNHUB-API-KEY-HERE"
+
+  # Phase B — concurrency profile (תואם ל-Finnhub free tier)
+  history_workers: 1
+  history_sleep_ms: 1100
   history_retries: 3              # ניסיונות נוספים על כשלי רשת
-  history_retry_delay_s: 5        # השהיה התחלתית (5s, 10s, 20s)
+  history_retry_delay_s: 10       # השהיה התחלתית לשגיאות גנריות
 
   min_market_cap_usd: 1000000000  # סף שווי שוק = 1 מיליארד דולר
   history_trading_days: 60        # חלון היסטוריה = 60 ימי מסחר
   test_tickers: ""                # סריקה חלקית לבדיקה — ראה למטה
 ```
 
-**מקורות הנתונים החדשים:** המערכת השתנתה כדי לא להיות תלויה ב-Yahoo
-Finance (שחוסם IP אגרסיבית). כל הנתונים מגיעים משלושה מקורות חינמיים
-וציבוריים — ללא הרשמה ובלי API key:
+**מקורות הנתונים:** המערכת משתמשת בשני מקורות חינמיים בלבד:
 
-1. **NASDAQ Trader + Wikipedia** — רשימת היקום (S&P 500 + NYSE + NASDAQ
-   Global Select + NYSE American + NYSE Arca).
-2. **SEC EDGAR** — שתי קריאות `https://data.sec.gov/...`:
-   * `company_tickers_exchange.json` — מיפוי טיקר ↔ CIK ↔ בורסה.
-   * XBRL Frames API — מספר המניות הסחירות (`CommonStockSharesOutstanding`)
-     לכל החברות במכה אחת.
-3. **Stooq** — נתוני OHLCV יומיים (`https://stooq.com/q/d/l/?s={ticker}.us&i=d`),
-   60 ימי מסחר אחרונים פר טיקר.
+1. **NASDAQ Trader + Wikipedia + SEC EDGAR** — רשימת היקום (S&P 500 +
+   NYSE + NASDAQ Global Select + NYSE American + NYSE Arca) ותוויות
+   בורסה אמינות לכל טיקר. ללא API key.
+2. **Finnhub** — שני endpoints לכל טיקר:
+   * `/stock/candle` — OHLCV יומי של 60 ימי מסחר.
+   * `/stock/profile2` — שווי שוק (`marketCapitalization` במיליוני USD).
 
-**חישוב שווי שוק:** `שווי שוק = Close אחרון מ-Stooq × מניות סחירות מ-SEC`.
-הסף $1B נשמר; המסנן עבר ל-Phase B.
+   דורש signup חד-פעמי באתר Finnhub והעתקת API key. ה-free tier הוא
+   60 קריאות/דקה — כלומר בריצה מלאה (~3,930 טיקרים × 2 קריאות) הסריקה
+   לוקחת בערך **2-2.5 שעות**. זה המחיר של חינמי + יציב.
 
-**חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי על שגיאות
-HTTP זמניות. אם Stooq מחזיר "אין נתונים" עבור טיקר — זה תשובה קבועה
-(לא retry). שורות שגיאה בלוג תיראינה ספציפיות:
-* `shares outstanding unavailable (no SEC CIK)` — ADR/חברה שלא רשומה ב-SEC.
-* `shares outstanding unavailable` — SEC רשם אבל אין נתון shares במאזן.
-* `stooq: Stooq did not return a CSV body for ...` — Stooq לא מכיר את הטיקר.
-* `stooq error after N attempts: HTTPError: ...` — Stooq חסם זמנית; נסה שוב מאוחר יותר.
-* `missing/NaN OHLCV (first missing date ...)` — נתונים חסרים בחלון 60 הימים.
+**חישוב שווי שוק:** `שווי שוק = marketCapitalization של Finnhub × 1,000,000`.
+הסף $1B נשמר.
 
-**אם Stooq חוסם אותך** (נדיר — אבל אם זה קורה):
-1. הורד את `history_workers` ל-1.
-2. העלה את `history_sleep_ms` ל-1000 או 2000.
+**חוסן וכשלים:** Phase B מבצע retry אוטומטי עם backoff מעריכי. תשובת
+"לא מכיר את הטיקר" של Finnhub נחשבת קבועה (לא retry). שגיאה 429 (rate
+limit) מקבלת backoff חזק יותר (20s, 40s, 80s). שורות שגיאה בלוג:
+* `finnhub candle: Finnhub /stock/candle returned s='no_data' for ...` —
+  Finnhub לא מכיר את הטיקר או שאין לו נתונים בחלון 60 הימים.
+* `finnhub profile: Finnhub /stock/profile2 has no positive marketCapitalization ...`
+  — Finnhub מכיר את הטיקר אבל אין לו שווי שוק (נדיר; ADR מסוים, או
+  טיקר שעדיין לא עודכן).
+* `finnhub candle rate-limited after N attempts: ...` — חרגנו מהקצב של
+  60 קריאות/דקה. אם זה קורה הרבה, הורד עוד את ה-`history_workers` או
+  העלה את `history_sleep_ms` ל-1500-2000.
+* `finnhub candle error after N attempts: HTTPError: ...` — שגיאת רשת
+  אחרת אחרי כל הניסיונות.
+* `missing/NaN OHLCV (first missing date ...)` — Finnhub החזיר נתונים
+  אבל חסרים ימים בתוך החלון.
+* `market cap $... below $1,000,000,000` — דחייה לגיטימית של small-cap.
 
 **סינון מקדים של non-stocks:** ה-parser דוחה אוטומטית (לפני שליחת הקריאה
 לרשת) טיקרים שלפי השם הם preferred shares / debentures / subordinated
@@ -145,8 +153,10 @@ python main.py
 ```
 
 זהו. הריצה תארך:
-- עם `test_tickers` של 5-10 מניות: שניות בודדות.
-- ריצה מלאה (~6,000 מניות): 15-30 דקות בערך, תלוי במהירות האינטרנט.
+- עם `test_tickers` של 5-10 מניות: 20-30 שניות (Phase A + 5-10
+  קריאות Finnhub).
+- ריצה מלאה (~3,900 מניות): **2-2.5 שעות** — שווי המחיר של ה-free
+  tier של Finnhub (60 קריאות/דקה × 2 קריאות לטיקר).
 
 במהלך הריצה תראה במסך התקדמות שלב אחר שלב, כולל מספר מניות שעברו /
 נדחו בכל שלב. בסיום תיווצר קובץ CSV חדש בתיקיית `output/` ויישלחו

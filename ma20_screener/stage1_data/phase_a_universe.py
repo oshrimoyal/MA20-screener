@@ -1,5 +1,6 @@
 """Phase A: build the universe from five complementary sources, enrich
-each ticker with its SEC CIK number, and pass on to Phase B.
+each ticker with its authoritative listing exchange, and pass on to
+Phase B.
 
 Universe sources (free, anonymous HTTP — no API key, no signup):
 
@@ -25,16 +26,15 @@ at parse time:
      preferred instrument (see `_NON_COMMON_STOCK_NAME_PATTERNS`).
 
 After the universe is merged and deduped, every ticker is enriched
-with its SEC CIK (and authoritative exchange label) from SEC EDGAR's
-free `company_tickers_exchange.json`. This is a single static-file
-download and adds no per-ticker round-trips. Tickers SEC does not
-list (e.g. some ADRs filing 20-F) get cik=None and rely on the
-source-known exchange label; they will be dropped in Phase B when
-shares-outstanding lookup fails.
+with the authoritative SEC EDGAR exchange label from
+`company_tickers_exchange.json`. This is a single static-file download
+and adds no per-ticker round-trips. Tickers SEC does not list (e.g.
+some ADRs filing 20-F) keep their source-known exchange label or fall
+back to "NYSE"; they are NOT dropped here — Finnhub decides per
+ticker in Phase B.
 
-**The marketCap >= $1B filter has moved to Phase B**, where it is
-computed as latest_close (from Stooq) × shares_outstanding (from SEC
-EDGAR Frames). Phase A no longer touches Yahoo Finance / yfinance.
+**The marketCap >= $1B filter lives in Phase B**, where it is read
+directly from Finnhub's `/stock/profile2.marketCapitalization`.
 """
 from __future__ import annotations
 
@@ -107,12 +107,11 @@ class Symbol:
 
 @dataclass(frozen=True)
 class UniverseEntry:
-    """A ticker that completed Phase A: name, exchange label for the
-    Stage-4 TradingView link, and the SEC CIK used by Phase B to look
-    up shares outstanding (None if SEC does not list this ticker)."""
+    """A ticker that completed Phase A: name and exchange label for
+    the Stage-4 TradingView link. The exchange label is one of
+    "NASDAQ" or "NYSE"."""
     ticker: str
     exchange: str
-    cik: Optional[int]
 
 
 # ----- Source 1: S&P 500 from Wikipedia ------------------------------------
@@ -430,19 +429,18 @@ def run_phase_a(
        1. Build the universe = union of the five source lists (or use
           `test_tickers` for a fast smoke run).
        2. Download SEC EDGAR's company_tickers_exchange.json (one
-          static file) and enrich each ticker with its CIK + the
-          authoritative exchange label.
-       3. Return UniverseEntry list. The marketCap filter has moved to
-          Phase B (it is computed from Stooq close × SEC shares
-          outstanding, both fetched there).
+          static file) and enrich each ticker with the authoritative
+          exchange label.
+       3. Return UniverseEntry list. The marketCap >=$1B filter lives
+          in Phase B (read directly from Finnhub's /stock/profile2).
 
     Tickers SEC does not list keep their source-known exchange label
-    and `cik=None`; Phase B will drop them with reason "shares
-    outstanding unavailable".
+    (or fall back to "NYSE") and are still forwarded to Phase B;
+    Finnhub decides per ticker whether to return data.
     """
     log = get_logger()
     log_stage_start(
-        "STAGE 1 — Phase A (universe build + SEC CIK enrichment)"
+        "STAGE 1 — Phase A (universe build + SEC exchange enrichment)"
     )
 
     if test_tickers:
@@ -456,7 +454,7 @@ def run_phase_a(
 
     log.info("Phase A: downloading SEC EDGAR company_tickers_exchange.json …")
     sec_map = sec_edgar.fetch_company_tickers(sec_user_agent)
-    log.info(f"Phase A: SEC EDGAR returned CIK + exchange for {len(sec_map)} tickers.")
+    log.info(f"Phase A: SEC EDGAR returned exchange labels for {len(sec_map)} tickers.")
 
     universe: list[UniverseEntry] = []
     matched_count = 0
@@ -464,10 +462,10 @@ def run_phase_a(
     for sym in symbols:
         sec_entry = sec_map.get(sym.ticker)
         if sec_entry is not None:
-            cik, sec_ex_str = sec_entry
+            _cik, sec_ex_str = sec_entry
             matched_count += 1
         else:
-            cik, sec_ex_str = None, ""
+            sec_ex_str = ""
             unmatched_count += 1
         # Choose the exchange label in priority order:
         # 1) authoritative SEC value, if recognised
@@ -480,12 +478,13 @@ def run_phase_a(
             exchange = sym.source_exchange
         else:
             exchange = "NYSE"
-        universe.append(UniverseEntry(ticker=sym.ticker, exchange=exchange, cik=cik))
+        universe.append(UniverseEntry(ticker=sym.ticker, exchange=exchange))
 
     log.info(
-        f"Phase A: matched {matched_count} tickers to SEC CIK; "
+        f"Phase A: matched {matched_count} tickers to SEC exchange labels; "
         f"{unmatched_count} unmatched (mostly ADRs / foreign issuers — "
-        f"these will be dropped in Phase B as 'shares outstanding unavailable')."
+        f"these rely on source_exchange or the 'NYSE' default for their "
+        f"exchange label, and are still passed to Finnhub in Phase B)."
     )
     log_stage_summary("STAGE 1 — Phase A", entered=len(symbols), passed=len(universe))
     return universe

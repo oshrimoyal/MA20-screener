@@ -14,30 +14,34 @@ paths:
   log_dir: "./logs"
 
 runtime:
-  # ---- SEC EDGAR ----
+  # ---- SEC EDGAR (Phase A exchange labels) ----
   # SEC's fair-access policy requires every request to include a real
   # contact email in the User-Agent header. Replace this with your own
   # email; SEC will return 403 if you keep a generic value.
   sec_user_agent: "MA20-Screener replace-me@example.com"
-  # Stooq does not require contact info; a polite UA is good practice.
-  # Defaults to sec_user_agent if omitted.
-  stooq_user_agent: "MA20-Screener replace-me@example.com"
 
-  # ---- Phase B (OHLCV from Stooq) ----
-  # Stooq does not publish a rate limit; empirically ~2 req/sec is fine.
-  # If you ever see "stooq error after N attempts" in the log, lower
-  # history_workers to 1 or raise history_sleep_ms.
-  history_workers: 3
-  history_sleep_ms: 500
-  # Retry on transient Stooq errors. Delay doubles each retry (5s, 10s, 20s).
-  # `StooqNotFound` (Stooq has no data for this ticker) is treated as a
-  # permanent answer and is NOT retried.
+  # ---- Finnhub (Phase B OHLCV + marketCap) ----
+  # Register free at https://finnhub.io/register and copy the API key
+  # from your dashboard into the line below. Free tier = 60 calls/min,
+  # 30 calls/sec hard cap. Each ticker uses 2 calls (candle + profile),
+  # so the full ~3,930-ticker universe takes ~2-2.5 hours per run.
+  finnhub_api_key: "PUT-YOUR-FINNHUB-API-KEY-HERE"
+
+  # ---- Phase B concurrency profile ----
+  # Defaults below stay safely under Finnhub's 60-calls/minute free
+  # tier (workers=1 + 1100ms sleep -> ~0.9 calls/sec sustained).
+  # If you upgrade to a paid Finnhub plan you can raise these.
+  history_workers: 1
+  history_sleep_ms: 1100
+  # Retry policy. Generic transient errors back off 10s, 20s, 40s.
+  # HTTP 429 (rate limited) backs off harder (20s, 40s, 80s) since
+  # Finnhub's rate-limit window is 60 seconds.
   history_retries: 3
-  history_retry_delay_s: 5
+  history_retry_delay_s: 10
 
   # ---- Universe / validation ----
-  # Minimum market capitalization threshold in USD. Computed in Phase B
-  # as: latest Stooq close × SEC EDGAR shares outstanding.
+  # Minimum market capitalization threshold in USD. Read directly from
+  # Finnhub's /stock/profile2.marketCapitalization (millions USD x 1e6).
   min_market_cap_usd: 1000000000
   # Number of trading days of OHLCV history required.
   history_trading_days: 60

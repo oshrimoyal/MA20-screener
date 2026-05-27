@@ -42,6 +42,7 @@ def main() -> int:
         f"history_retry_delay_s={cfg.runtime.history_retry_delay_s} "
         f"min_mcap=${cfg.runtime.min_market_cap_usd:,.0f} "
         f"history_days={cfg.runtime.history_trading_days} "
+        f"finnhub_api_key={'<set>' if cfg.runtime.finnhub_api_key else '<missing>'} "
         f"test_tickers={cfg.runtime.test_tickers or '(none)'}"
     )
 

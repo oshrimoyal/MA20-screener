@@ -1,41 +1,31 @@
-"""Phase B: fetch 60-day OHLCV from Stooq, look up shares outstanding
-from SEC EDGAR, compute marketCap, and apply the >=$1B filter.
+"""Phase B: fetch 60-day OHLCV and market capitalization from Finnhub
+and apply the >=$1B filter.
 
-This is the largest behavioural change in the project: Yahoo Finance
-(yfinance) is no longer involved. Instead we combine two free,
-anonymous HTTP sources:
+Two Finnhub endpoints are used per ticker (free tier, 60 calls/minute
+total, one-time email signup):
 
-  * Stooq — per-ticker daily CSV at
-    https://stooq.com/q/d/l/?s={ticker}.us&i=d. Returns full daily
-    history; we slice to the expected 60-trading-day window. No
-    signup, no API key. Per-call retry-with-exponential-backoff
-    handles transient errors; `StooqNotFound` (Stooq returns no CSV)
-    is treated as a permanent answer and not retried.
-
-  * SEC EDGAR XBRL Frames API — ONE bulk call per recent calendar
-    quarter returns `CommonStockSharesOutstanding` for every U.S.
-    filer at that period end. We iterate the most recent 2-4 quarters
-    and take the first value found per CIK. Free, anonymous, but
-    requires a real contact email in the User-Agent header.
+  * /stock/candle    — daily OHLCV bars across a Unix-timestamp window
+                       wide enough to cover the expected 60 trading
+                       days plus a safety pad.
+  * /stock/profile2  — company profile containing
+                       `marketCapitalization` in MILLIONS of USD.
 
 For each universe ticker we:
-  1. Look up shares outstanding by CIK (from the bulk SEC fetch).
-     Tickers with `cik=None` or no shares data are rejected as
-     "shares outstanding unavailable" (typical for ADRs filing 20-F).
-  2. Fetch the daily OHLCV CSV from Stooq, validate that it covers
-     the expected 60 closed trading days with no NaN values.
-  3. Compute marketCap = latest_close × shares_outstanding. Apply the
-     >=$1B filter here (it has moved from Phase A).
+  1. Fetch daily candles, validate that the response covers the
+     expected 60 closed trading days with no NaN values.
+  2. Fetch the company profile, read marketCapitalization, multiply by
+     1_000_000, apply the >=$1B filter.
 
-The shares-outstanding figure is up to 90 days stale (quarterly
-filings); irrelevant for the $1B cut-off because large-cap share
-counts move slowly.
+`FinnhubNotFound` (Finnhub does not have data for this ticker /
+window) is treated as a permanent answer and is NOT retried.
+`FinnhubRateLimited` (HTTP 429) is retried with a longer backoff than
+generic transient errors since the rate-limit window is 60 seconds.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 
@@ -45,12 +35,20 @@ from ma20_screener.logger import (
     log_stage_summary,
     log_ticker_fail,
 )
-from ma20_screener.utils import sec_edgar, stooq
+from ma20_screener.utils import finnhub
 from ma20_screener.utils.concurrency import parallel_map
 from ma20_screener.utils.market_time import get_last_n_closed_trading_days
 from ma20_screener.stage1_data.phase_a_universe import UniverseEntry
 
 _OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
+
+# Pad each side of the expected 60-trading-day window when asking
+# Finnhub for candles. Generous enough to absorb timezone offsets and
+# the few calendar days of slack between two trading days.
+_CANDLE_WINDOW_PAD_DAYS = 7
+# Rate-limit backoff is harder than for generic transient errors
+# because Finnhub's free-tier window is 60 seconds.
+_RATE_LIMIT_INITIAL_DELAY_S = 20.0
 
 
 @dataclass(frozen=True)
@@ -61,41 +59,51 @@ class HistoryEntry:
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
 
 
-def _fetch_stooq_with_retry(
+def _fetch_with_retry(
+    func: Callable[..., object],
     ticker: str,
-    user_agent: str,
+    *args,
     retries: int,
     retry_delay_s: float,
-) -> tuple[Optional[pd.DataFrame], Optional[str]]:
-    """Fetch full daily history from Stooq with bounded retry on
-    transient errors. `StooqNotFound` is treated as permanent (no
-    retry) since Stooq has answered cleanly that the ticker is not
-    in its database.
+    rate_limit_delay_s: float = _RATE_LIMIT_INITIAL_DELAY_S,
+    label: str = "finnhub",
+) -> tuple[Optional[object], Optional[str]]:
+    """Call `func(ticker, *args)` with bounded retry on transient
+    errors. `FinnhubNotFound` is treated as permanent (no retry).
+    `FinnhubRateLimited` is retried with the rate-limit-specific
+    initial delay (which still doubles each attempt). Other exceptions
+    use the generic `retry_delay_s` and also double.
 
-    Returns (DataFrame, None) on success or (None, reason) on
-    permanent failure. The reason string includes the exception type
-    so the operator can distinguish Stooq HTTP throttles from genuine
-    "ticker unknown" answers.
-    """
-    last_exc: Optional[Exception] = None
-    delay = retry_delay_s
+    Returns (result, None) on success or (None, reason) on permanent
+    failure / exhausted retries."""
     total_attempts = max(1, retries + 1)
+    delay = retry_delay_s
+    rl_delay = rate_limit_delay_s
+    last_exc: Optional[Exception] = None
+    last_was_rate_limit = False
     for attempt in range(total_attempts):
         try:
-            return stooq.fetch_ohlcv(ticker, user_agent), None
-        except stooq.StooqNotFound as e:
-            # Permanent — Stooq does not have this ticker. Don't retry.
-            return None, f"stooq: {e}"
+            return func(ticker, *args), None
+        except finnhub.FinnhubNotFound as e:
+            return None, f"{label}: {e}"
+        except finnhub.FinnhubRateLimited as e:
+            last_exc = e
+            last_was_rate_limit = True
+            if attempt < total_attempts - 1:
+                time.sleep(rl_delay)
+                rl_delay *= 2.0
         except Exception as e:
             last_exc = e
+            last_was_rate_limit = False
             if attempt < total_attempts - 1:
                 time.sleep(delay)
                 delay *= 2.0
-    reason = (
-        f"stooq error after {total_attempts} attempts: "
+    if last_was_rate_limit:
+        return None, f"{label} rate-limited after {total_attempts} attempts: {last_exc}"
+    return None, (
+        f"{label} error after {total_attempts} attempts: "
         f"{type(last_exc).__name__}: {last_exc}"
     )
-    return None, reason
 
 
 def _validate_history(
@@ -145,58 +153,48 @@ def run_phase_b(
     workers: int,
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
-    sec_user_agent: str,
-    stooq_user_agent: str,
+    finnhub_api_key: str,
     retries: int = 3,
-    retry_delay_s: float = 5.0,
+    retry_delay_s: float = 10.0,
 ) -> list[HistoryEntry]:
     """Run Phase B end-to-end.
 
-    1. ONE bulk fetch of `CommonStockSharesOutstanding` from SEC EDGAR
-       (1-4 HTTP calls, no per-ticker round-trip).
-    2. Per-ticker (parallel, throttled) Stooq OHLCV fetch + strict
-       validation.
-    3. marketCap = latest close × shares; filter >= `min_market_cap_usd`.
+    1. Compute the closed-trading-day window and convert it to Unix
+       timestamps (with a safety pad) for the Finnhub candle endpoint.
+    2. Per-ticker (parallel, throttled):
+         a. /stock/candle  -> validate against the 60-day window.
+         b. /stock/profile2 -> read marketCapitalization (millions USD).
+    3. marketCap = profile.marketCapitalization * 1_000_000;
+       filter >= `min_market_cap_usd`.
     """
     log = get_logger()
-    log_stage_start(
-        "STAGE 1 — Phase B (Stooq OHLCV + SEC shares + marketCap filter)"
-    )
+    log_stage_start("STAGE 1 — Phase B (Finnhub OHLCV + marketCap filter)")
 
-    # ---- 1. SEC EDGAR shares outstanding (bulk) ---------------------------
-    log.info("Phase B: fetching shares outstanding from SEC EDGAR XBRL Frames …")
-    shares_by_cik, quarters_used = sec_edgar.fetch_shares_outstanding(
-        user_agent=sec_user_agent,
-    )
-    log.info(
-        f"Phase B: SEC EDGAR returned shares for {len(shares_by_cik)} CIKs "
-        f"(quarters: {quarters_used or '<none returned>'})."
-    )
-
-    # ---- 2. Per-ticker Stooq OHLCV + marketCap ----------------------------
     expected_dates = get_last_n_closed_trading_days(history_trading_days)
+    pad = pd.Timedelta(days=_CANDLE_WINDOW_PAD_DAYS)
+    window_start = expected_dates[0] - pad
+    window_end = expected_dates[-1] + pd.Timedelta(days=1)
+    unix_from = int(window_start.tz_localize("UTC").timestamp())
+    unix_to = int(window_end.tz_localize("UTC").timestamp())
+
     log.info(
         f"Phase B: pulling {history_trading_days} trading days "
         f"({expected_dates[0].strftime('%Y-%m-%d')} → "
         f"{expected_dates[-1].strftime('%Y-%m-%d')}) "
-        f"for {len(universe)} tickers from Stooq "
+        f"for {len(universe)} tickers from Finnhub "
         f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
         f"retries={retries}, retry_delay_s={retry_delay_s})…"
     )
 
     def _job(u: UniverseEntry) -> Optional[HistoryEntry]:
-        # 2a. Shares outstanding from the pre-fetched bulk dict.
-        if u.cik is None:
-            log_ticker_fail(u.ticker, "shares outstanding unavailable (no SEC CIK)")
-            return None
-        shares = shares_by_cik.get(u.cik)
-        if shares is None:
-            log_ticker_fail(u.ticker, "shares outstanding unavailable")
-            return None
-
-        # 2b. OHLCV from Stooq with bounded retry.
-        df, fetch_reason = _fetch_stooq_with_retry(
-            u.ticker, stooq_user_agent, retries=retries, retry_delay_s=retry_delay_s
+        # 1. Candles.
+        df, fetch_reason = _fetch_with_retry(
+            finnhub.fetch_candles,
+            u.ticker,
+            finnhub_api_key, unix_from, unix_to,
+            retries=retries,
+            retry_delay_s=retry_delay_s,
+            label="finnhub candle",
         )
         if fetch_reason is not None:
             log_ticker_fail(u.ticker, fetch_reason)
@@ -206,9 +204,21 @@ def run_phase_b(
             log_ticker_fail(u.ticker, val_reason)
             return None
 
-        # 2c. marketCap = latest close × shares; apply >= $1B filter.
-        latest_close = float(clean["Close"].iloc[-1])
-        market_cap = latest_close * float(shares)
+        # 2. Profile (marketCapitalization in MILLIONS USD).
+        profile, prof_reason = _fetch_with_retry(
+            finnhub.fetch_profile,
+            u.ticker,
+            finnhub_api_key,
+            retries=retries,
+            retry_delay_s=retry_delay_s,
+            label="finnhub profile",
+        )
+        if prof_reason is not None:
+            log_ticker_fail(u.ticker, prof_reason)
+            return None
+
+        market_cap_millions = float(profile.get("marketCapitalization") or 0.0)
+        market_cap = market_cap_millions * 1_000_000.0
         if market_cap < min_market_cap_usd:
             log_ticker_fail(
                 u.ticker,
