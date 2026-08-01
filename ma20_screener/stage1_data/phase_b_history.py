@@ -46,6 +46,7 @@ class HistoryEntry:
     ticker: str
     exchange: str
     market_cap: float
+    last_day_volume: float  # Volume of the last closed session in the window
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
 
 
@@ -140,6 +141,7 @@ def run_phase_b(
     workers: int,
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
+    min_last_day_volume: float,
     fmp_api_key: str,
     retries: int = 3,
     retry_delay_s: float = 5.0,
@@ -148,15 +150,17 @@ def run_phase_b(
 
        1. Compute the closed-trading-day window.
        2. Per-ticker (parallel, throttled): fetch historical OHLCV,
-          validate against the 60-day window, fetch quote (for
-          marketCap), apply the >=$1B filter.
+          validate against the 60-day window, then apply the liquidity
+          gate — BOTH conditions must hold:
+            marketCap        >= `min_market_cap_usd`
+            last-day Volume  >  `min_last_day_volume`
 
     Two FMP calls per ticker. At ~503 S&P 500 tickers and Starter's
     300 calls/min, the full run completes in ~3-4 minutes assuming
     the standard config (`workers=1`, `sleep_ms=250` → ~4 calls/sec).
     """
     log = get_logger()
-    log_stage_start("STAGE 1 — Phase B (FMP OHLCV)")
+    log_stage_start("STAGE 1 — Phase B (FMP OHLCV + marketCap/volume filter)")
 
     expected_dates = get_last_n_closed_trading_days(history_trading_days)
     pad = pd.Timedelta(days=_HISTORICAL_WINDOW_PAD_DAYS)
@@ -170,6 +174,11 @@ def run_phase_b(
         f"for {len(universe)} tickers from FMP "
         f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
         f"retries={retries}, retry_delay_s={retry_delay_s})…"
+    )
+    log.info(
+        f"Phase B: liquidity gate — market cap >= ${min_market_cap_usd:,.0f} "
+        f"AND last-day volume > {min_last_day_volume:,.0f} shares "
+        f"(both must hold)."
     )
 
     def _job(u: UniverseEntry) -> Optional[HistoryEntry]:
@@ -192,20 +201,35 @@ def run_phase_b(
             log_ticker_fail(u.ticker, val_reason)
             return None
 
-        # Defensive: Phase A's screener applied the floor server-side,
-        # but enforce it again here so test-mode tickers (which bypass
-        # the screener) still get filtered.
+        # Liquidity gate. Both conditions must hold for the ticker to
+        # continue. The market-cap floor is also applied server-side by
+        # Phase A's screener, but is enforced again here so test-mode
+        # tickers (which bypass the screener) still get filtered. The
+        # volume threshold reads the last closed candle of the window —
+        # the same session every other check analyses — rather than an
+        # average. Every failing threshold is named in the log line so
+        # the operator sees the full picture.
+        last_day_volume = float(clean["Volume"].iloc[-1])
+
+        failures: list[str] = []
         if u.market_cap < min_market_cap_usd:
-            log_ticker_fail(
-                u.ticker,
-                f"market cap ${u.market_cap:,.0f} below ${min_market_cap_usd:,.0f}",
+            failures.append(
+                f"market cap ${u.market_cap:,.0f} below ${min_market_cap_usd:,.0f}"
             )
+        if last_day_volume <= min_last_day_volume:
+            failures.append(
+                f"last-day volume {last_day_volume:,.0f} not above "
+                f"{min_last_day_volume:,.0f}"
+            )
+        if failures:
+            log_ticker_fail(u.ticker, "; ".join(failures))
             return None
 
         return HistoryEntry(
             ticker=u.ticker,
             exchange=u.exchange,
             market_cap=u.market_cap,
+            last_day_volume=last_day_volume,
             ohlcv=clean,
         )
 

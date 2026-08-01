@@ -35,9 +35,15 @@ runtime:
   history_retry_delay_s: 5
 
   # ---- Universe / validation ----
+  # A ticker must satisfy BOTH thresholds below to continue past Phase B.
   # Minimum market capitalization threshold in USD. Read directly from
   # FMP's /quote.marketCap.
   min_market_cap_usd: 1000000000
+  # Minimum traded volume on the LAST closed trading day, in shares.
+  # Taken from the final candle of the 60-day window (not an average).
+  # The ticker must trade STRICTLY MORE than this value (1,000,000
+  # shares exactly is rejected).
+  min_last_day_volume: 1000000
   # Number of trading days of OHLCV history required.
   history_trading_days: 60
   # Optional: limit Phase A to this comma-separated list of tickers (testing).

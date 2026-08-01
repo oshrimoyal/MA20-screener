@@ -32,8 +32,11 @@ class RuntimeConfig:
     history_retries: int          # attempts AFTER the first try
     history_retry_delay_s: float  # initial delay for non-429 errors;
                                   # 429 errors back off harder.
-    # Universe / validation.
+    # Universe / validation. A ticker must clear BOTH thresholds in
+    # Phase B: marketCap >= min_market_cap_usd AND last-day volume
+    # strictly greater than min_last_day_volume.
     min_market_cap_usd: float
+    min_last_day_volume: float
     history_trading_days: int
     test_tickers: list[str]
     # FMP API key (Starter tier or higher — Basic free tier is too
@@ -104,6 +107,9 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         history_retries=int(rt_raw.get("history_retries", 3)),
         history_retry_delay_s=float(rt_raw.get("history_retry_delay_s", 5.0)),
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),
+        # Defaults to 1,000,000 shares so configs written before this
+        # threshold existed keep the intended behaviour.
+        min_last_day_volume=float(rt_raw.get("min_last_day_volume", 1_000_000)),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
         test_tickers=test_tickers,
         fmp_api_key=fmp_api_key,
