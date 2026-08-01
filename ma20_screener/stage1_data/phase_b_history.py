@@ -24,8 +24,13 @@ For each universe ticker we:
      "shares outstanding unavailable" (typical for ADRs filing 20-F).
   2. Fetch the daily OHLCV CSV from Stooq, validate that it covers
      the expected 60 closed trading days with no NaN values.
-  3. Compute marketCap = latest_close × shares_outstanding. Apply the
-     >=$1B filter here (it has moved from Phase A).
+  3. Compute marketCap = latest_close × shares_outstanding, and read
+     the traded volume of the last closed session. A ticker continues
+     to Phase C only when BOTH liquidity thresholds hold:
+       * marketCap >= min_market_cap_usd  (>=$1B; moved from Phase A)
+       * last-day Volume > min_last_day_volume  (>1,000,000 shares)
+     Failing either one rejects the ticker; the log line names every
+     threshold that failed.
 
 The shares-outstanding figure is up to 90 days stale (quarterly
 filings); irrelevant for the $1B cut-off because large-cap share
@@ -58,6 +63,7 @@ class HistoryEntry:
     ticker: str
     exchange: str
     market_cap: float
+    last_day_volume: float  # Volume of the last closed session in the window
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
 
 
@@ -145,6 +151,7 @@ def run_phase_b(
     workers: int,
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
+    min_last_day_volume: float,
     sec_user_agent: str,
     stooq_user_agent: str,
     retries: int = 3,
@@ -156,11 +163,13 @@ def run_phase_b(
        (1-4 HTTP calls, no per-ticker round-trip).
     2. Per-ticker (parallel, throttled) Stooq OHLCV fetch + strict
        validation.
-    3. marketCap = latest close × shares; filter >= `min_market_cap_usd`.
+    3. Liquidity gate — BOTH conditions must hold:
+         marketCap = latest close × shares >= `min_market_cap_usd`
+         last-day Volume                   >  `min_last_day_volume`
     """
     log = get_logger()
     log_stage_start(
-        "STAGE 1 — Phase B (Stooq OHLCV + SEC shares + marketCap filter)"
+        "STAGE 1 — Phase B (Stooq OHLCV + SEC shares + marketCap/volume filter)"
     )
 
     # ---- 1. SEC EDGAR shares outstanding (bulk) ---------------------------
@@ -182,6 +191,11 @@ def run_phase_b(
         f"for {len(universe)} tickers from Stooq "
         f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
         f"retries={retries}, retry_delay_s={retry_delay_s})…"
+    )
+    log.info(
+        f"Phase B: liquidity gate — market cap >= ${min_market_cap_usd:,.0f} "
+        f"AND last-day volume > {min_last_day_volume:,.0f} shares "
+        f"(both must hold)."
     )
 
     def _job(u: UniverseEntry) -> Optional[HistoryEntry]:
@@ -206,20 +220,34 @@ def run_phase_b(
             log_ticker_fail(u.ticker, val_reason)
             return None
 
-        # 2c. marketCap = latest close × shares; apply >= $1B filter.
+        # 2c. Liquidity gate. Both conditions must hold for the ticker to
+        # continue: marketCap = latest close × shares is at least
+        # `min_market_cap_usd`, AND the last closed session traded more
+        # than `min_last_day_volume` shares. Every failing threshold is
+        # named in the log line so the operator sees the full picture.
         latest_close = float(clean["Close"].iloc[-1])
         market_cap = latest_close * float(shares)
+        last_day_volume = float(clean["Volume"].iloc[-1])
+
+        failures: list[str] = []
         if market_cap < min_market_cap_usd:
-            log_ticker_fail(
-                u.ticker,
-                f"market cap ${market_cap:,.0f} below ${min_market_cap_usd:,.0f}",
+            failures.append(
+                f"market cap ${market_cap:,.0f} below ${min_market_cap_usd:,.0f}"
             )
+        if last_day_volume <= min_last_day_volume:
+            failures.append(
+                f"last-day volume {last_day_volume:,.0f} not above "
+                f"{min_last_day_volume:,.0f}"
+            )
+        if failures:
+            log_ticker_fail(u.ticker, "; ".join(failures))
             return None
 
         return HistoryEntry(
             ticker=u.ticker,
             exchange=u.exchange,
             market_cap=market_cap,
+            last_day_volume=last_day_volume,
             ohlcv=clean,
         )
 

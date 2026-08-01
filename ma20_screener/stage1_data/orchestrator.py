@@ -21,13 +21,15 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
     )
 
     # Phase B: per-ticker OHLCV from Stooq + bulk shares from SEC EDGAR
-    # XBRL Frames + computed marketCap + >=$1B filter.
+    # XBRL Frames + computed marketCap + the liquidity gate
+    # (marketCap >= $1B AND last-day volume > 1M shares).
     histories = run_phase_b(
         universe=universe,
         history_trading_days=cfg.runtime.history_trading_days,
         workers=cfg.runtime.history_workers,
         fetch_sleep_ms=cfg.runtime.history_sleep_ms,
         min_market_cap_usd=cfg.runtime.min_market_cap_usd,
+        min_last_day_volume=cfg.runtime.min_last_day_volume,
         sec_user_agent=cfg.runtime.sec_user_agent,
         stooq_user_agent=cfg.runtime.stooq_user_agent,
         retries=cfg.runtime.history_retries,
