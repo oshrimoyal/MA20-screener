@@ -23,14 +23,15 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
         test_tickers=cfg.runtime.test_tickers or None,
     )
 
-    # Phase B: per-ticker OHLCV from FMP /stable/historical-price-eod/full.
+    # Phase B: per-ticker OHLCV from FMP /stable/historical-price-eod/full,
+    # then the liquidity gate (marketCap >= $1B AND 14-day avg volume > 1M).
     histories = run_phase_b(
         universe=universe,
         history_trading_days=cfg.runtime.history_trading_days,
         workers=cfg.runtime.history_workers,
         fetch_sleep_ms=cfg.runtime.history_sleep_ms,
         min_market_cap_usd=cfg.runtime.min_market_cap_usd,
-        min_last_day_volume=cfg.runtime.min_last_day_volume,
+        min_volume_ma=cfg.runtime.min_volume_ma,
         fmp_api_key=cfg.runtime.fmp_api_key,
         retries=cfg.runtime.history_retries,
         retry_delay_s=cfg.runtime.history_retry_delay_s,

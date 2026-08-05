@@ -39,6 +39,9 @@ _OHLCV_COLS = ["Open", "High", "Low", "Close", "Volume"]
 _HISTORICAL_WINDOW_PAD_DAYS = 7
 # Initial backoff for HTTP 429. Doubles per attempt.
 _RATE_LIMIT_INITIAL_DELAY_S = 10.0
+# Trailing window, in closed sessions, used for the average-volume gate.
+# Must be <= history_trading_days; the 60-day window guarantees that.
+_VOLUME_MA_DAYS = 14
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,7 @@ class HistoryEntry:
     ticker: str
     exchange: str
     market_cap: float
-    last_day_volume: float  # Volume of the last closed session in the window
+    volume_ma: float  # Mean Volume over the last _VOLUME_MA_DAYS closed sessions
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
 
 
@@ -141,7 +144,7 @@ def run_phase_b(
     workers: int,
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
-    min_last_day_volume: float,
+    min_volume_ma: float,
     fmp_api_key: str,
     retries: int = 3,
     retry_delay_s: float = 5.0,
@@ -153,7 +156,7 @@ def run_phase_b(
           validate against the 60-day window, then apply the liquidity
           gate — BOTH conditions must hold:
             marketCap        >= `min_market_cap_usd`
-            last-day Volume  >  `min_last_day_volume`
+            mean Volume over the last 14 sessions > `min_volume_ma`
 
     Two FMP calls per ticker. At ~503 S&P 500 tickers and Starter's
     300 calls/min, the full run completes in ~3-4 minutes assuming
@@ -177,7 +180,7 @@ def run_phase_b(
     )
     log.info(
         f"Phase B: liquidity gate — market cap >= ${min_market_cap_usd:,.0f} "
-        f"AND last-day volume > {min_last_day_volume:,.0f} shares "
+        f"AND {_VOLUME_MA_DAYS}-day avg volume > {min_volume_ma:,.0f} shares "
         f"(both must hold)."
     )
 
@@ -205,21 +208,23 @@ def run_phase_b(
         # continue. The market-cap floor is also applied server-side by
         # Phase A's screener, but is enforced again here so test-mode
         # tickers (which bypass the screener) still get filtered. The
-        # volume threshold reads the last closed candle of the window —
-        # the same session every other check analyses — rather than an
-        # average. Every failing threshold is named in the log line so
-        # the operator sees the full picture.
-        last_day_volume = float(clean["Volume"].iloc[-1])
+        # volume threshold averages the last `_VOLUME_MA_DAYS` closed
+        # sessions rather than reading a single candle, so one unusually
+        # quiet or unusually busy day cannot decide a ticker's fate. The
+        # data is already in hand, so this costs no extra FMP call.
+        # Every failing threshold is named in the log line so the
+        # operator sees the full picture.
+        volume_ma = float(clean["Volume"].iloc[-_VOLUME_MA_DAYS:].mean())
 
         failures: list[str] = []
         if u.market_cap < min_market_cap_usd:
             failures.append(
                 f"market cap ${u.market_cap:,.0f} below ${min_market_cap_usd:,.0f}"
             )
-        if last_day_volume <= min_last_day_volume:
+        if volume_ma <= min_volume_ma:
             failures.append(
-                f"last-day volume {last_day_volume:,.0f} not above "
-                f"{min_last_day_volume:,.0f}"
+                f"{_VOLUME_MA_DAYS}-day avg volume {volume_ma:,.0f} not above "
+                f"{min_volume_ma:,.0f}"
             )
         if failures:
             log_ticker_fail(u.ticker, "; ".join(failures))
@@ -229,7 +234,7 @@ def run_phase_b(
             ticker=u.ticker,
             exchange=u.exchange,
             market_cap=u.market_cap,
-            last_day_volume=last_day_volume,
+            volume_ma=volume_ma,
             ohlcv=clean,
         )
 

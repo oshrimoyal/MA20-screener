@@ -39,11 +39,13 @@ runtime:
   # Minimum market capitalization threshold in USD. Read directly from
   # FMP's /quote.marketCap.
   min_market_cap_usd: 1000000000
-  # Minimum traded volume on the LAST closed trading day, in shares.
-  # Taken from the final candle of the 60-day window (not an average).
-  # The ticker must trade STRICTLY MORE than this value (1,000,000
-  # shares exactly is rejected).
-  min_last_day_volume: 1000000
+  # Minimum AVERAGE traded volume over the last 14 closed trading
+  # sessions, in shares. Computed from the tail of the 60-day OHLCV
+  # window already in hand, so it costs no extra FMP call. Averaging
+  # keeps one unusually quiet or unusually busy session from deciding
+  # a ticker's fate. The ticker must exceed this value STRICTLY
+  # (an average of exactly 1,000,000 is rejected).
+  min_volume_ma: 1000000
   # Number of trading days of OHLCV history required.
   history_trading_days: 60
   # Optional: limit Phase A to this comma-separated list of tickers (testing).
