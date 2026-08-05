@@ -113,6 +113,7 @@ def fetch_company_screener(
     api_key: str,
     exchange: Optional[str] = None,
     market_cap_more_than: Optional[float] = None,
+    volume_more_than: Optional[float] = None,
     is_etf: Optional[bool] = None,
     is_fund: Optional[bool] = None,
     is_actively_trading: Optional[bool] = None,
@@ -140,6 +141,11 @@ def fetch_company_screener(
         params["exchange"] = str(exchange)
     if market_cap_more_than is not None:
         params["marketCapMoreThan"] = str(int(market_cap_more_than))
+    if volume_more_than is not None:
+        # NOTE: FMP ignores volumeMoreThan=0 (verified against the live
+        # API: the row count is identical with and without it). Pass 1
+        # to exclude non-trading instruments.
+        params["volumeMoreThan"] = str(int(volume_more_than))
     if is_etf is not None:
         params["isEtf"] = "true" if is_etf else "false"
     if is_fund is not None:
