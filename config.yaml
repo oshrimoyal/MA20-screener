@@ -24,10 +24,21 @@ runtime:
   fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
   # ---- Phase B concurrency profile ----
-  # Defaults yield ~4 calls/sec = ~240 calls/min, safely under the
-  # Starter 300/min ceiling. Raise history_workers (or lower
-  # history_sleep_ms) if you upgrade to Premium / Ultimate.
-  history_workers: 4
+  # Pacing is done by a shared rate limiter: every worker thread draws
+  # evenly spaced slots from one timeline, so the sustained rate is
+  # exactly history_rate_per_min no matter how slow FMP is on the day.
+  # Set it just under your plan's ceiling (Starter = 300 calls/min).
+  # Set to 0 to fall back to the old per-call sleep pacing.
+  history_rate_per_min: 295
+  # Maximum calls in flight at once. With the limiter on, this is NOT
+  # the throttle — it only has to be high enough that a thread is
+  # always free to claim the next slot. Rule of thumb:
+  # rate_per_min x latency_seconds / 60, plus headroom. At ~0.85s per
+  # call and 295/min that is ~4.2, so 8 leaves room for slow responses.
+  # The log prints the rate actually achieved; if it lands well under
+  # history_rate_per_min, raise this.
+  history_workers: 8
+  # Only used when history_rate_per_min is 0.
   history_sleep_ms: 250
   # Retry policy. Generic transient errors back off 5s, 10s, 20s.
   # HTTP 429 (rate limited) backs off harder (10s, 20s, 40s).
@@ -39,11 +50,13 @@ runtime:
   # Minimum market capitalization threshold in USD. Read directly from
   # FMP's /quote.marketCap.
   min_market_cap_usd: 1000000000
-  # Minimum traded volume on the LAST closed trading day, in shares.
-  # Taken from the final candle of the 60-day window (not an average).
-  # The ticker must trade STRICTLY MORE than this value (1,000,000
-  # shares exactly is rejected).
-  min_last_day_volume: 1000000
+  # Minimum AVERAGE traded volume over the last 14 closed trading
+  # sessions, in shares. Computed from the tail of the 60-day OHLCV
+  # window already in hand, so it costs no extra FMP call. Averaging
+  # keeps one unusually quiet or unusually busy session from deciding
+  # a ticker's fate. The ticker must exceed this value STRICTLY
+  # (an average of exactly 1,000,000 is rejected).
+  min_volume_ma: 1000000
   # Number of trading days of OHLCV history required.
   history_trading_days: 60
   # Optional: limit Phase A to this comma-separated list of tickers (testing).

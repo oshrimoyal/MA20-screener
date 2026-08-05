@@ -1,28 +1,37 @@
 """Phase A: build the universe via FMP /stable/company-screener.
 
-Normal mode: two screener calls (NASDAQ + NYSE) with marketCap >= $1B
-plus isEtf=false, isFund=false, isActivelyTrading=true, country=US.
-The screener response already includes `marketCap` and
-`exchangeShortName`, so Phase B does NOT need a separate quote pass.
+The universe is EVERY symbol listed on NASDAQ or NYSE, minus exactly
+four exclusions. Nothing else is filtered out — ETFs, closed-end
+funds and foreign issuers (ADRs) are all in scope.
+
+The four exclusions, and where each is enforced:
+
+  1. marketCap < $1B          — screener, server-side (re-checked here)
+  2. ticker contains `$`      — here (preferred-share series)
+  3. ticker contains `-`      — here. After the dot-to-dash
+     normalisation, class-share variants such as `BRK.B`/`BF.B`
+     arrive as `BRK-B`/`BF-B`. FMP gates these to a higher tier on
+     `/stable/historical-price-eod/full` anyway, so dropping them in
+     Phase A saves a wasted call per ticker in Phase B.
+  4. 14-session average volume <= 1M — Phase B, once OHLCV is in hand
+
+Two further screener parameters are hygiene flags rather than
+selection criteria — neither can remove an instrument that could have
+survived exclusion 4, so both only avoid paying for a doomed call:
+
+  * `volumeMoreThan=1` — drops instruments that do not trade at all,
+    almost entirely open-end mutual funds (see SCREENER_MIN_VOLUME).
+  * `isActivelyTrading=true` — drops halted and delisted symbols.
+
+`isEtf`, `isFund` and `country` are deliberately left unconstrained.
+
+Normal mode: two screener calls (NASDAQ + NYSE). The response already
+includes `marketCap` and `exchangeShortName`, so Phase B does NOT need
+a separate quote pass.
 
 Test mode: when `test_tickers` is set in config.yaml, Phase A skips
 the screener and instead makes one /stable/quote call per requested
-symbol. This keeps smoke runs cheap (a handful of calls) without
-pulling the full ~1,900-ticker universe.
-
-Two client-side ticker-character filters apply after the screener:
-  * Any ticker containing `$` -> dropped (preferred-share series).
-  * Any ticker containing `-` -> dropped. After the dot-to-dash
-    normalisation, class-share variants such as `BRK.B`/`BF.B`
-    arrive here as `BRK-B`/`BF-B`. FMP gates these tickers to a
-    higher tier on `/stable/historical-price-eod/full` anyway, so
-    dropping them in Phase A saves a wasted call per ticker in
-    Phase B.
-
-All other "non-common stock" classes (warrants, units, rights) are
-filtered by FMP's `isActivelyTrading`/`isEtf`/`isFund` flags or fail
-downstream in Phase B with no historical data; we do NOT enforce
-additional suffix filters in code.
+symbol, keeping smoke runs cheap.
 """
 from __future__ import annotations
 
@@ -39,6 +48,20 @@ from ma20_screener.utils import fmp
 
 
 MARKET_CAP_FLOOR_USD = 1_000_000_000.0
+# Screener-side floor that excludes instruments which do not trade at
+# all — overwhelmingly open-end mutual funds, which NASDAQ lists in the
+# thousands (VTSAX, VFIAX, …) and which report volume 0 because they
+# price at NAV rather than on an exchange. Measured against the live
+# API: 2,266 of 3,558 NASDAQ rows and 2 of 1,604 NYSE rows carry
+# volume 0, so this drops ~44% of the universe.
+#
+# This costs nothing in coverage: an instrument with no volume can
+# never clear the min_volume_ma gate in Phase B, so every ticker
+# removed here would have been rejected there anyway — after paying
+# for its OHLCV call.
+#
+# The value is 1, not 0: FMP silently ignores volumeMoreThan=0.
+SCREENER_MIN_VOLUME = 1
 _SCREENER_EXCHANGES = ("NASDAQ", "NYSE")
 
 
@@ -74,23 +97,32 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
     seen: dict[str, UniverseEntry] = {}
     skipped_dollar = 0
     skipped_dash = 0
+    skipped_zero_volume = 0
     skipped_unknown_exchange = 0
     skipped_below_floor = 0
     skipped_dup = 0
     for exchange in _SCREENER_EXCHANGES:
         log.info(
             f"Phase A: FMP company-screener exchange={exchange} "
-            f"(marketCap >= ${MARKET_CAP_FLOOR_USD:,.0f}, isEtf=false, "
-            f"isFund=false, isActivelyTrading=true, country=US)…"
+            f"(marketCap >= ${MARKET_CAP_FLOOR_USD:,.0f}, "
+            f"volume >= {SCREENER_MIN_VOLUME}, isActivelyTrading=true; "
+            f"ETFs, closed-end funds and non-US issuers are NOT excluded, "
+            f"but non-trading instruments such as open-end mutual funds "
+            f"are)…"
         )
         rows = fmp.fetch_company_screener(
             api_key=fmp_api_key,
             exchange=exchange,
             market_cap_more_than=MARKET_CAP_FLOOR_USD,
-            is_etf=False,
-            is_fund=False,
+            volume_more_than=SCREENER_MIN_VOLUME,
+            # isEtf / isFund / country are deliberately NOT constrained:
+            # the universe is every NASDAQ- or NYSE-listed symbol above
+            # the market-cap floor, ETFs, closed-end funds and foreign
+            # issuers (ADRs) included. isActivelyTrading stays on — it
+            # excludes nothing tradeable (a halted or delisted symbol has
+            # no volume and would fail the last-day volume gate anyway)
+            # and saves one wasted FMP call per dead ticker.
             is_actively_trading=True,
-            country="US",
         )
         added = 0
         for row in rows:
@@ -99,6 +131,13 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
                 continue
             ticker = _normalise_ticker(symbol)
             if not ticker:
+                continue
+            # Canary for the server-side volumeMoreThan filter. It should
+            # never fire; if it starts to, FMP changed the parameter's
+            # behaviour and the log will say so instead of silently
+            # burning a Phase B call per fund.
+            if not row.get("volume"):
+                skipped_zero_volume += 1
                 continue
             if "$" in ticker:
                 skipped_dollar += 1
@@ -132,6 +171,12 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
         log.info(
             f"Phase A: screener returned {len(rows)} rows for "
             f"exchange={exchange}; added {added} new unique tickers."
+        )
+    if skipped_zero_volume:
+        log.info(
+            f"Phase A: dropped {skipped_zero_volume} zero-volume rows that "
+            f"the server-side volumeMoreThan filter let through — FMP may "
+            f"have changed its behaviour."
         )
     if skipped_dollar:
         log.info(

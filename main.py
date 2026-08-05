@@ -38,10 +38,11 @@ def main() -> int:
     log.info(
         f"Config: history_workers={cfg.runtime.history_workers} "
         f"history_sleep_ms={cfg.runtime.history_sleep_ms} "
+        f"history_rate_per_min={cfg.runtime.history_rate_per_min:,.0f} "
         f"history_retries={cfg.runtime.history_retries} "
         f"history_retry_delay_s={cfg.runtime.history_retry_delay_s} "
         f"min_mcap=${cfg.runtime.min_market_cap_usd:,.0f} "
-        f"min_last_day_volume={cfg.runtime.min_last_day_volume:,.0f} "
+        f"min_volume_ma={cfg.runtime.min_volume_ma:,.0f} "
         f"history_days={cfg.runtime.history_trading_days} "
         f"fmp_api_key={'<set>' if cfg.runtime.fmp_api_key else '<missing>'} "
         f"test_tickers={cfg.runtime.test_tickers or '(none)'}"

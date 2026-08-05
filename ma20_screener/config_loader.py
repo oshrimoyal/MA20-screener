@@ -28,15 +28,16 @@ class RuntimeConfig:
     # tickers = ~1,900 calls. The defaults yield ~4 calls/sec
     # (~240/min), safely under the 300/min ceiling.
     history_workers: int
-    history_sleep_ms: int
+    history_sleep_ms: int          # ignored when history_rate_per_min > 0
+    history_rate_per_min: float    # 0 disables the limiter (sleep mode)
     history_retries: int          # attempts AFTER the first try
     history_retry_delay_s: float  # initial delay for non-429 errors;
                                   # 429 errors back off harder.
     # Universe / validation. A ticker must clear BOTH thresholds in
-    # Phase B: marketCap >= min_market_cap_usd AND last-day volume
-    # strictly greater than min_last_day_volume.
+    # Phase B: marketCap >= min_market_cap_usd AND the 14-session mean
+    # volume strictly greater than min_volume_ma.
     min_market_cap_usd: float
-    min_last_day_volume: float
+    min_volume_ma: float
     history_trading_days: int
     test_tickers: list[str]
     # FMP API key (Starter tier or higher — Basic free tier is too
@@ -104,12 +105,13 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
     runtime = RuntimeConfig(
         history_workers=int(rt_raw.get("history_workers", 1)),
         history_sleep_ms=int(rt_raw.get("history_sleep_ms", 250)),
+        history_rate_per_min=float(rt_raw.get("history_rate_per_min", 295)),
         history_retries=int(rt_raw.get("history_retries", 3)),
         history_retry_delay_s=float(rt_raw.get("history_retry_delay_s", 5.0)),
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),
         # Defaults to 1,000,000 shares so configs written before this
         # threshold existed keep the intended behaviour.
-        min_last_day_volume=float(rt_raw.get("min_last_day_volume", 1_000_000)),
+        min_volume_ma=float(rt_raw.get("min_volume_ma", 1_000_000)),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
         test_tickers=test_tickers,
         fmp_api_key=fmp_api_key,
