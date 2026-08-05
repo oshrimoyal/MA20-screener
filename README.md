@@ -1,7 +1,8 @@
 # MA20 Screener
 
-A daily long-side stock screener over the NYSE + NASDAQ universe
-(market cap >= $1B, common stocks only). The system applies a
+A daily long-side stock screener over the NYSE + NASDAQ universe —
+every listed symbol above $1B market cap, ETFs, closed-end funds and
+ADRs included. The system applies a
 6-category filter to every closed-candle session and emits both a
 per-run CSV (all stocks, passed + rejected) and a Telegram broadcast
 of the day's candidates.

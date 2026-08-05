@@ -1,28 +1,33 @@
 """Phase A: build the universe via FMP /stable/company-screener.
 
-Normal mode: two screener calls (NASDAQ + NYSE) with marketCap >= $1B
-plus isEtf=false, isFund=false, isActivelyTrading=true, country=US.
-The screener response already includes `marketCap` and
-`exchangeShortName`, so Phase B does NOT need a separate quote pass.
+The universe is EVERY symbol listed on NASDAQ or NYSE, minus exactly
+four exclusions. Nothing else is filtered out — ETFs, closed-end
+funds and foreign issuers (ADRs) are all in scope.
+
+The four exclusions, and where each is enforced:
+
+  1. marketCap < $1B          — screener, server-side (re-checked here)
+  2. ticker contains `$`      — here (preferred-share series)
+  3. ticker contains `-`      — here. After the dot-to-dash
+     normalisation, class-share variants such as `BRK.B`/`BF.B`
+     arrive as `BRK-B`/`BF-B`. FMP gates these to a higher tier on
+     `/stable/historical-price-eod/full` anyway, so dropping them in
+     Phase A saves a wasted call per ticker in Phase B.
+  4. last-day volume <= 1M    — Phase B, once OHLCV is in hand
+
+`isActivelyTrading=true` is also sent, but it is a hygiene flag rather
+than a selection criterion: a halted or delisted symbol has no volume
+and would fail exclusion 4 regardless, so keeping it only avoids
+paying for a doomed FMP call. `isEtf`, `isFund` and `country` are
+deliberately left unconstrained.
+
+Normal mode: two screener calls (NASDAQ + NYSE). The response already
+includes `marketCap` and `exchangeShortName`, so Phase B does NOT need
+a separate quote pass.
 
 Test mode: when `test_tickers` is set in config.yaml, Phase A skips
 the screener and instead makes one /stable/quote call per requested
-symbol. This keeps smoke runs cheap (a handful of calls) without
-pulling the full ~1,900-ticker universe.
-
-Two client-side ticker-character filters apply after the screener:
-  * Any ticker containing `$` -> dropped (preferred-share series).
-  * Any ticker containing `-` -> dropped. After the dot-to-dash
-    normalisation, class-share variants such as `BRK.B`/`BF.B`
-    arrive here as `BRK-B`/`BF-B`. FMP gates these tickers to a
-    higher tier on `/stable/historical-price-eod/full` anyway, so
-    dropping them in Phase A saves a wasted call per ticker in
-    Phase B.
-
-All other "non-common stock" classes (warrants, units, rights) are
-filtered by FMP's `isActivelyTrading`/`isEtf`/`isFund` flags or fail
-downstream in Phase B with no historical data; we do NOT enforce
-additional suffix filters in code.
+symbol, keeping smoke runs cheap.
 """
 from __future__ import annotations
 
@@ -80,17 +85,22 @@ def _build_from_screener(fmp_api_key: str) -> list[UniverseEntry]:
     for exchange in _SCREENER_EXCHANGES:
         log.info(
             f"Phase A: FMP company-screener exchange={exchange} "
-            f"(marketCap >= ${MARKET_CAP_FLOOR_USD:,.0f}, isEtf=false, "
-            f"isFund=false, isActivelyTrading=true, country=US)…"
+            f"(marketCap >= ${MARKET_CAP_FLOOR_USD:,.0f}, "
+            f"isActivelyTrading=true; ETFs, funds and non-US issuers "
+            f"are NOT excluded)…"
         )
         rows = fmp.fetch_company_screener(
             api_key=fmp_api_key,
             exchange=exchange,
             market_cap_more_than=MARKET_CAP_FLOOR_USD,
-            is_etf=False,
-            is_fund=False,
+            # isEtf / isFund / country are deliberately NOT constrained:
+            # the universe is every NASDAQ- or NYSE-listed symbol above
+            # the market-cap floor, ETFs, closed-end funds and foreign
+            # issuers (ADRs) included. isActivelyTrading stays on — it
+            # excludes nothing tradeable (a halted or delisted symbol has
+            # no volume and would fail the last-day volume gate anyway)
+            # and saves one wasted FMP call per dead ticker.
             is_actively_trading=True,
-            country="US",
         )
         added = 0
         for row in rows:
