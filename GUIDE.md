@@ -79,9 +79,10 @@ runtime:
   # Starter = 300 קריאות/דקה, ללא תקרת יום.
   fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
-  # Phase B — concurrency profile (תואם ל-FMP Starter tier)
-  history_workers: 1
-  history_sleep_ms: 250
+  # Phase B — ויסות קצב מול מכסת FMP
+  history_rate_per_min: 295       # תקרת Starter היא 300/דקה
+  history_workers: 8              # כמה קריאות במקביל (לא ה-throttle)
+  history_sleep_ms: 250           # בשימוש רק אם rate_per_min = 0
   history_retries: 3              # ניסיונות נוספים על כשלי רשת
   history_retry_delay_s: 5        # השהיה התחלתית לשגיאות גנריות
 
@@ -112,6 +113,22 @@ BOTHBAD — FAIL: market cap $200,000,000 below $1,000,000,000; 14-day avg volum
 ```
 אפשר לשנות כל אחד מהספים בקובץ ההגדרות בלי לגעת בקוד. להורדת סף
 הווליום למחצית המיליון, לדוגמה: `min_volume_ma: 500000`.
+
+**ויסות הקצב:** ‏FMP Starter מתיר 300 קריאות לדקה. המערכת מווסתת את
+עצמה באמצעות מונה משותף שמחלק "חלונות" בפער אחיד בין כל ה-threads, כך
+שהקצב הוא בדיוק `history_rate_per_min` — לא משנה כמה מהר או לאט FMP
+עונה באותו יום.
+
+`history_workers` הוא **לא** הבלם, אלא רק כמה קריאות מותר שיהיו באוויר
+בו-זמנית. הוא צריך להיות גבוה מספיק כדי שתמיד יהיה thread פנוי לתפוס
+את החלון הבא — 8 מספיק בשפע.
+
+בסוף Phase B הלוג מדווח את הקצב שהושג בפועל:
+```
+Phase B: 2500 calls in 508.5s = 295 calls/min achieved (ceiling 295/min).
+```
+אם המספר נמוך משמעותית מהתקרה — העלה את `history_workers`. אם מופיע
+בלוג `fmp historical rate-limited` — הורד את `history_rate_per_min`.
 
 **מקורות הנתונים:** המערכת משתמשת אך ורק ב-FMP (Starter ומעלה):
 
@@ -149,8 +166,7 @@ Starter = 300 קריאות/דקה, ללא תקרת יום. ריצה מלאה ~1,
 * `fmp historical: FMP returned no historical rows for ...` — FMP לא
   מכיר את הטיקר או שאין נתונים בחלון 60 הימים.
 * `fmp historical rate-limited after N attempts: ...` — חרגנו מ-300
-  קריאות/דקה. אם זה קורה הרבה, העלה את `history_sleep_ms` או הורד
-  את `history_workers`.
+  קריאות/דקה. אם זה קורה הרבה, הורד את `history_rate_per_min`.
 * `fmp historical error after N attempts: HTTPError: ...` — שגיאת
   רשת אחרת אחרי כל הניסיונות.
 * `missing/NaN OHLCV (first missing date ...)` — FMP החזיר נתונים אבל
@@ -182,8 +198,9 @@ python main.py
 זהו. הריצה תארך:
 - עם `test_tickers` של 5-10 מניות: ~15-20 שניות (Phase A: 1 quote
   call לכל test-ticker; Phase B: 1 historical call לכל test-ticker).
-- ריצה מלאה (~1,900 מניות NYSE+NASDAQ $1B+): **~8 דקות** עם
-  `workers=1, sleep_ms=250`. מהיר יותר עם `workers=4`.
+- ריצה מלאה: הזמן נגזר ישירות מהמכסה —
+  `מספר הטיקרים ÷ history_rate_per_min`. עם ~2,500 טיקרים ו-295/דקה
+  זה **~8.5 דקות**, וזו הרצפה התיאורטית של מנוי Starter.
 
 במהלך הריצה תראה במסך התקדמות שלב אחר שלב, כולל מספר מניות שעברו /
 נדחו בכל שלב. בסיום תיווצר קובץ CSV חדש בתיקיית `output/` ויישלחו

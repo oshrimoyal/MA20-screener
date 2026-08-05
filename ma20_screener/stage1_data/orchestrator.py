@@ -35,6 +35,7 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
         fmp_api_key=cfg.runtime.fmp_api_key,
         retries=cfg.runtime.history_retries,
         retry_delay_s=cfg.runtime.history_retry_delay_s,
+        rate_per_min=cfg.runtime.history_rate_per_min,
     )
 
     final = run_phase_c(histories)

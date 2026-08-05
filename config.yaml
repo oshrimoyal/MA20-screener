@@ -24,10 +24,21 @@ runtime:
   fmp_api_key: "PUT-YOUR-FMP-API-KEY-HERE"
 
   # ---- Phase B concurrency profile ----
-  # Defaults yield ~4 calls/sec = ~240 calls/min, safely under the
-  # Starter 300/min ceiling. Raise history_workers (or lower
-  # history_sleep_ms) if you upgrade to Premium / Ultimate.
-  history_workers: 4
+  # Pacing is done by a shared rate limiter: every worker thread draws
+  # evenly spaced slots from one timeline, so the sustained rate is
+  # exactly history_rate_per_min no matter how slow FMP is on the day.
+  # Set it just under your plan's ceiling (Starter = 300 calls/min).
+  # Set to 0 to fall back to the old per-call sleep pacing.
+  history_rate_per_min: 295
+  # Maximum calls in flight at once. With the limiter on, this is NOT
+  # the throttle — it only has to be high enough that a thread is
+  # always free to claim the next slot. Rule of thumb:
+  # rate_per_min x latency_seconds / 60, plus headroom. At ~0.85s per
+  # call and 295/min that is ~4.2, so 8 leaves room for slow responses.
+  # The log prints the rate actually achieved; if it lands well under
+  # history_rate_per_min, raise this.
+  history_workers: 8
+  # Only used when history_rate_per_min is 0.
   history_sleep_ms: 250
   # Retry policy. Generic transient errors back off 5s, 10s, 20s.
   # HTTP 429 (rate limited) backs off harder (10s, 20s, 40s).

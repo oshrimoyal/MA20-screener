@@ -28,7 +28,8 @@ class RuntimeConfig:
     # tickers = ~1,900 calls. The defaults yield ~4 calls/sec
     # (~240/min), safely under the 300/min ceiling.
     history_workers: int
-    history_sleep_ms: int
+    history_sleep_ms: int          # ignored when history_rate_per_min > 0
+    history_rate_per_min: float    # 0 disables the limiter (sleep mode)
     history_retries: int          # attempts AFTER the first try
     history_retry_delay_s: float  # initial delay for non-429 errors;
                                   # 429 errors back off harder.
@@ -104,6 +105,7 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
     runtime = RuntimeConfig(
         history_workers=int(rt_raw.get("history_workers", 1)),
         history_sleep_ms=int(rt_raw.get("history_sleep_ms", 250)),
+        history_rate_per_min=float(rt_raw.get("history_rate_per_min", 295)),
         history_retries=int(rt_raw.get("history_retries", 3)),
         history_retry_delay_s=float(rt_raw.get("history_retry_delay_s", 5.0)),
         min_market_cap_usd=float(_require(rt_raw, "min_market_cap_usd", "runtime")),

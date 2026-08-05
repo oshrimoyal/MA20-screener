@@ -148,6 +148,7 @@ def run_phase_b(
     fmp_api_key: str,
     retries: int = 3,
     retry_delay_s: float = 5.0,
+    rate_per_min: float = 0.0,
 ) -> list[HistoryEntry]:
     """Run Phase B end-to-end.
 
@@ -175,9 +176,21 @@ def run_phase_b(
         f"({expected_dates[0].strftime('%Y-%m-%d')} → "
         f"{expected_dates[-1].strftime('%Y-%m-%d')}) "
         f"for {len(universe)} tickers from FMP "
-        f"(workers={workers}, sleep_ms={fetch_sleep_ms}, "
+        f"(workers={workers}, "
+        f"{f'rate={rate_per_min:,.0f}/min' if rate_per_min else f'sleep_ms={fetch_sleep_ms}'}, "
         f"retries={retries}, retry_delay_s={retry_delay_s})…"
     )
+    if rate_per_min:
+        log.info(
+            f"Phase B: pacing via shared rate limiter at {rate_per_min:,.0f} "
+            f"calls/min (history_sleep_ms is ignored in this mode)."
+        )
+    else:
+        log.info(
+            "Phase B: pacing via per-call sleep — the effective rate follows "
+            "upstream latency. Set runtime.history_rate_per_min to pace "
+            "against the API quota instead."
+        )
     log.info(
         f"Phase B: liquidity gate — market cap >= ${min_market_cap_usd:,.0f} "
         f"AND {_VOLUME_MA_DAYS}-day avg volume > {min_volume_ma:,.0f} shares "
@@ -238,7 +251,20 @@ def run_phase_b(
             ohlcv=clean,
         )
 
-    results = parallel_map(_job, universe, workers=workers, sleep_ms=fetch_sleep_ms)
+    t0 = time.monotonic()
+    results = parallel_map(
+        _job, universe, workers=workers, sleep_ms=fetch_sleep_ms,
+        rate_per_min=rate_per_min or None,
+    )
+    elapsed = max(time.monotonic() - t0, 1e-9)
+    # Report the rate actually achieved. If it sits well below the
+    # configured ceiling, `history_workers` is the binding constraint,
+    # not the limiter — raise it.
+    log.info(
+        f"Phase B: {len(universe)} calls in {elapsed:,.1f}s = "
+        f"{len(universe) / elapsed * 60:,.0f} calls/min achieved"
+        + (f" (ceiling {rate_per_min:,.0f}/min)." if rate_per_min else ".")
+    )
     passed = [r for r in results if r is not None]
     log_stage_summary("STAGE 1 — Phase B", entered=len(universe), passed=len(passed))
     return passed
