@@ -39,6 +39,13 @@ class RuntimeConfig:
     min_market_cap_usd: float
     min_volume_ma: float
     history_trading_days: int
+    # Category 4 (distance from the SMA 20), in units of "ATR% fitting
+    # into the distance%". A ticker passes only when it closes ABOVE the
+    # SMA 20 by less than `sma20_max_atr_above`, or BELOW it by more than
+    # `sma20_min_atr_below`. Both boundaries are exclusive on the passing
+    # side, and a close exactly on the average is rejected.
+    sma20_max_atr_above: float
+    sma20_min_atr_below: float
     test_tickers: list[str]
     # FMP API key (Starter tier or higher — Basic free tier is too
     # constrained at this universe size). Validated by `load_config`.
@@ -113,6 +120,10 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         # threshold existed keep the intended behaviour.
         min_volume_ma=float(rt_raw.get("min_volume_ma", 1_000_000)),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
+        # Defaults match the shipped config.yaml so a config written
+        # before these thresholds existed keeps the intended behaviour.
+        sma20_max_atr_above=float(rt_raw.get("sma20_max_atr_above", 2.0)),
+        sma20_min_atr_below=float(rt_raw.get("sma20_min_atr_below", 1.5)),
         test_tickers=test_tickers,
         fmp_api_key=fmp_api_key,
     )

@@ -59,6 +59,32 @@ runtime:
   min_volume_ma: 1000000
   # Number of trading days of OHLCV history required.
   history_trading_days: 60
+
+  # ---- Category 4: distance from the SMA 20 ----
+  # The distance is measured the way you read it on a chart: the gap
+  # between the close and the SMA 20 as a PERCENT of price, divided by
+  # ATR(14) as a percent of price. The result is "how many ATR%'s fit
+  # into the distance". Both numbers below are in those units, so they
+  # mean the same thing on a quiet stock and on a wild one.
+  #
+  # A ticker passes Category 4 in exactly two situations:
+  #   * ABOVE the SMA 20 by LESS than sma20_max_atr_above
+  #        -> healthy zone, the average is holding it up.
+  #   * BELOW the SMA 20 by MORE than sma20_min_atr_below
+  #        -> stretched far enough that the average acts as a magnet
+  #           and should pull the price back up.
+  # Everything else is rejected: too far above (chasing a stock that
+  # already ran), and anything under the average but not far under it
+  # (stuck below, the average is acting as a ceiling it cannot break).
+  #
+  # Boundaries are exclusive on the passing side: exactly 2.0 above is
+  # rejected, exactly 1.5 below is rejected, and a close sitting exactly
+  # ON the average is rejected.
+  #
+  # Raise sma20_max_atr_above to tolerate more extended stocks. Lower
+  # sma20_min_atr_below to accept shallower pullbacks under the average.
+  sma20_max_atr_above: 2.0
+  sma20_min_atr_below: 1.5
   # Optional: limit Phase A to this comma-separated list of tickers (testing).
   # Leave empty for a full S&P 500 scan.
   test_tickers: ""

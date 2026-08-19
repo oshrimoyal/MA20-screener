@@ -43,6 +43,8 @@ def main() -> int:
         f"history_retry_delay_s={cfg.runtime.history_retry_delay_s} "
         f"min_mcap=${cfg.runtime.min_market_cap_usd:,.0f} "
         f"min_volume_ma={cfg.runtime.min_volume_ma:,.0f} "
+        f"sma20_max_atr_above={cfg.runtime.sma20_max_atr_above:g} "
+        f"sma20_min_atr_below={cfg.runtime.sma20_min_atr_below:g} "
         f"history_days={cfg.runtime.history_trading_days} "
         f"fmp_api_key={'<set>' if cfg.runtime.fmp_api_key else '<missing>'} "
         f"test_tickers={cfg.runtime.test_tickers or '(none)'}"
@@ -51,7 +53,11 @@ def main() -> int:
     t0 = time.time()
     stage1_results = run_stage1(cfg)
     stage2_results = run_stage2(stage1_results)
-    decisions = run_stage3(stage2_results)
+    decisions = run_stage3(
+        stage2_results,
+        sma20_max_atr_above=cfg.runtime.sma20_max_atr_above,
+        sma20_min_atr_below=cfg.runtime.sma20_min_atr_below,
+    )
 
     # The "run date" used for the CSV file name and Telegram header is the
     # date of the last closed trading day (i.e. the candle we analysed).

@@ -83,5 +83,26 @@ Pipeline stages live in `ma20_screener/`:
 |---|---|
 | 1. Data infrastructure | `stage1_data/` (Phase A FMP `company-screener` for the NASDAQ+NYSE >= $1B universe, Phase B FMP OHLCV with strict validation + liquidity gate — market cap >= $1B **and** 14-session average volume > 1M shares, Phase C SMA20 / Wilder ATR% / Lambert CCI14 / open gaps) |
 | 2. Six raw checks | `stage2_checks/` (trend, candle + 11 formations, 7-day volume, SMA20 position, gaps vs price, CCI status) |
-| 3. Six-category AND filter | `stage3_filter/filter.py` |
+| 3. Category AND filter | `stage3_filter/filter.py` — Categories 2-6 decide; Category 1 (trend) is computed but disabled |
+
+### Category 4 — distance from the SMA 20
+
+The distance is read the way it looks on a chart: the gap between the
+close and the SMA 20 as a **percent of price**, divided by **ATR(14) as a
+percent of price**. One threshold then means the same thing on a quiet
+stock and on a volatile one.
+
+| Close vs SMA 20 | Result | Why |
+|---|---|---|
+| **2.0 ATR% or more above** | rejected | the move already happened — we do not chase |
+| **less than 2.0 ATR% above** | **passes** | healthy zone, the average is holding it up |
+| **on the average, or up to 1.5 ATR% below** | rejected | stuck — the average is a ceiling it has not broken |
+| **more than 1.5 ATR% below** | **passes** | far enough that the average acts as a magnet |
+
+Both boundaries are exclusive on the passing side, and a close sitting
+exactly on the average is rejected. Tune them via `runtime.sma20_max_atr_above`
+and `runtime.sma20_min_atr_below` in `config.yaml` — no code change needed.
+
+`SMA20_Role` and `SMA20_Breakout` are still computed and still written to
+the CSV and the Telegram message, but they no longer affect the decision.
 | 4. CSV + Telegram | `stage4_output/csv_writer.py`, `stage4_output/telegram_sender.py` |
