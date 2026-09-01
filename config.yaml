@@ -57,8 +57,71 @@ runtime:
   # a ticker's fate. The ticker must exceed this value STRICTLY
   # (an average of exactly 1,000,000 is rejected).
   min_volume_ma: 1000000
-  # Number of trading days of OHLCV history required.
+  # Number of trading days of OHLCV history required. Every one of these
+  # sessions must be present and complete or the ticker is dropped, and
+  # ALL indicator and category maths runs on this window, nothing longer.
   history_trading_days: 60
+
+  # ---- 52-week low lookback ----
+  # Trading days pulled per ticker. This is the SAME single FMP call as
+  # before with a wider date range, so it costs no extra calls and no
+  # extra runtime (the rate limiter sets the pace, not the payload size).
+  # FMP Starter allows up to 5 years per call, so 252 is well inside it.
+  #
+  # These extra sessions are used for ONE thing: locating the 52-week
+  # low. They deliberately do NOT feed the indicators or the other
+  # categories — widening the analysis window would change Category 5,
+  # which would start counting year-old gaps and flip verdicts.
+  #
+  # A ticker with less history than this (listed recently) is NOT
+  # dropped: its low comes from whatever sessions it does have, and the
+  # CSV reports how many were used in Low_52W_Sessions.
+  history_long_trading_days: 252
+
+  # ---- Category 7: distance from the 52-week low ----
+  # Rejects stocks camped on their lows — a downtrend the other
+  # categories cannot tell apart from a pullback.
+  #
+  # The check takes the LOWEST LOW of the last low52w_lookback_sessions
+  # sessions, not just the last close, so a stock that tagged its low
+  # last week and has since bounced is still caught. That low is then
+  # compared to the 52-week low:
+  #     percent above = (recent low - 52w low) / 52w low * 100
+  # A ticker is REJECTED when this comes in below low52w_min_pct_above.
+  # The comparison is inclusive: exactly 10.00% passes.
+  #
+  # Raise low52w_min_pct_above to demand more clearance above the low
+  # (fewer candidates); lower it to be more permissive. Raise
+  # low52w_lookback_sessions to look further back for a visit to the low
+  # (stricter); lower it to only care about very recent action.
+  low52w_lookback_sessions: 10
+  low52w_min_pct_above: 20.0
+
+  # ---- Category 4: distance from the SMA 20 ----
+  # The distance is measured the way you read it on a chart: the gap
+  # between the close and the SMA 20 as a PERCENT of price, divided by
+  # ATR(14) as a percent of price. The result is "how many ATR%'s fit
+  # into the distance". Both numbers below are in those units, so they
+  # mean the same thing on a quiet stock and on a wild one.
+  #
+  # A ticker passes Category 4 in exactly two situations:
+  #   * ABOVE the SMA 20 by LESS than sma20_max_atr_above
+  #        -> healthy zone, the average is holding it up.
+  #   * BELOW the SMA 20 by MORE than sma20_min_atr_below
+  #        -> stretched far enough that the average acts as a magnet
+  #           and should pull the price back up.
+  # Everything else is rejected: too far above (chasing a stock that
+  # already ran), and anything under the average but not far under it
+  # (stuck below, the average is acting as a ceiling it cannot break).
+  #
+  # Boundaries are exclusive on the passing side: exactly 2.0 above is
+  # rejected, exactly 1.5 below is rejected, and a close sitting exactly
+  # ON the average is rejected.
+  #
+  # Raise sma20_max_atr_above to tolerate more extended stocks. Lower
+  # sma20_min_atr_below to accept shallower pullbacks under the average.
+  sma20_max_atr_above: 2.0
+  sma20_min_atr_below: 1.5
   # Optional: limit Phase A to this comma-separated list of tickers (testing).
   # Leave empty for a full S&P 500 scan.
   test_tickers: ""

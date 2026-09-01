@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 from datetime import date
+from math import isfinite
 from pathlib import Path
 
 from ma20_screener.logger import get_logger
@@ -33,6 +34,10 @@ CSV_COLUMNS = [
     "CCI_Value",
     "CCI_Slope",
     "CCI_Zone",
+    "Low_52W",
+    "Recent_Low",
+    "Pct_Above_52W_Low",
+    "Low_52W_Sessions",
     "Chart_Link",
 ]
 
@@ -50,13 +55,16 @@ def _format_reason(d: FilterDecision) -> str:
 
 
 def _chart_link(exchange: str, ticker: str) -> str:
-    # yfinance-style tickers use '-' where TradingView still uses '.'.
+    # Phase A normalises FMP's 'BRK.B' to the internal 'BRK-B'; TradingView
+    # wants the dot back. (yfinance, which the '-' form originally came
+    # from, has not been part of this pipeline for a long time.)
     tv_ticker = ticker.replace("-", ".")
     return f"https://www.tradingview.com/chart/?symbol={exchange}:{tv_ticker}"
 
 
 def _row(d: FilterDecision) -> dict[str, object]:
     s = d.s2
+    lp = s.low_proximity
     day0 = next(v for v in s.volume.days if v.day == 0)
     patterns = ", ".join(s.candle.formations)
     return {
@@ -79,6 +87,13 @@ def _row(d: FilterDecision) -> dict[str, object]:
         "CCI_Value": f"{s.cci.cci_today:.2f}",
         "CCI_Slope": s.cci.slope_direction,
         "CCI_Zone": s.cci.zone,
+        "Low_52W": f"{lp.low_52w:.2f}",
+        "Recent_Low": f"{lp.recent_low:.2f}",
+        # Blank rather than "nan" when Check 7 could not evaluate the
+        # ticker, so the column stays sortable in a spreadsheet.
+        "Pct_Above_52W_Low": ("" if not isfinite(lp.pct_above_low)
+                              else f"{lp.pct_above_low:.2f}"),
+        "Low_52W_Sessions": lp.low_52w_sessions,
         "Chart_Link": _chart_link(s.exchange, s.ticker),
     }
 

@@ -1,4 +1,4 @@
-"""Stage 2 orchestrator: run the six raw checks for every ticker."""
+"""Stage 2 orchestrator: run the seven raw checks for every ticker."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,6 +21,11 @@ from ma20_screener.stage2_checks.check4_sma_position import (
 )
 from ma20_screener.stage2_checks.check5_gaps import GapsResult, run_check_5
 from ma20_screener.stage2_checks.check6_cci import CCIResult, run_check_6
+from ma20_screener.stage2_checks.check7_low_proximity import (
+    DEFAULT_LOOKBACK_SESSIONS,
+    LowProximityResult,
+    run_check_7,
+)
 
 
 @dataclass(frozen=True)
@@ -36,12 +41,20 @@ class Stage2Result:
     sma_position: SMAPositionResult
     gaps: GapsResult
     cci: CCIResult
+    low_proximity: LowProximityResult
 
 
-def run_stage2(tickers: list[TickerData]) -> list[Stage2Result]:
+def run_stage2(
+    tickers: list[TickerData],
+    low52w_lookback_sessions: int = DEFAULT_LOOKBACK_SESSIONS,
+) -> list[Stage2Result]:
     log = get_logger()
     log_stage_start("STAGE 2 (raw checks)")
-    log.info(f"Stage 2: running 6 checks for {len(tickers)} tickers…")
+    log.info(f"Stage 2: running 7 checks for {len(tickers)} tickers…")
+    log.info(
+        f"Stage 2: Check 7 compares the lowest low of the last "
+        f"{low52w_lookback_sessions} sessions against the 52-week low."
+    )
 
     out: list[Stage2Result] = []
     for td in tickers:
@@ -52,6 +65,7 @@ def run_stage2(tickers: list[TickerData]) -> list[Stage2Result]:
             sma_pos = run_check_4(td)
             gaps = run_check_5(td)
             cci = run_check_6(td)
+            low_prox = run_check_7(td, low52w_lookback_sessions)
         except Exception as e:
             log_ticker_fail(td.ticker, f"Stage 2 error: {e}")
             continue
@@ -68,6 +82,7 @@ def run_stage2(tickers: list[TickerData]) -> list[Stage2Result]:
                 sma_position=sma_pos,
                 gaps=gaps,
                 cci=cci,
+                low_proximity=low_prox,
             )
         )
     log_stage_summary("STAGE 2", entered=len(tickers), passed=len(out))
