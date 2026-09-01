@@ -27,6 +27,14 @@ NOTE — Category 4 is a pure distance test.
     Telegram message — they are informational only. Both thresholds
     come from config.yaml.
 
+NOTE — Category 5 turns on the NEAREST gap.
+    Category 5 used to pass as soon as any open gap sat above the price,
+    however far away, so a gap just underfoot could be excused by one
+    far overhead. It now ranks open gaps by distance to their near edge
+    and lets the closest one decide: nearest above passes, nearest below
+    rejects. A price already inside a gap, and a ticker with no open
+    gaps, both still pass.
+
 NOTE — Category 7 added.
     Category 7 rejects a ticker whose recent price action sits too close
     to its 52-week low. The lowest low of the last
@@ -56,6 +64,7 @@ from ma20_screener.stage2_checks.check2_candle import (
     PIERCING_LINE, THREE_WHITE_SOLDIERS, TWEEZER_BOTTOM,
 )
 from ma20_screener.stage2_checks.check3_volume import GREEN as V_GREEN, RED as V_RED
+from ma20_screener.stage2_checks.check5_gaps import POS_ABOVE
 from ma20_screener.stage2_checks.check6_cci import SLOPE_POSITIVE
 from ma20_screener.stage2_checks.orchestrator import Stage2Result
 
@@ -212,17 +221,29 @@ def _eval_cat4(
     return False
 
 
-# Category 5 — gaps --------------------------------------------------------
+# Category 5 — gaps: the nearest one decides --------------------------------
+# The gap closest to the price carries the whole verdict. It is the one
+# the price will reach first and the one that will actually pull it, so
+# an open gap far overhead cannot excuse a gap sitting just underfoot.
+#
+#   * price inside a gap  — passes. It is filling that gap right now;
+#     there is no magnet left to pull it either way.
+#   * no open gaps at all — passes, unchanged.
+#   * nearest gap ABOVE   — passes. Room overhead.
+#   * nearest gap BELOW   — rejected, whatever sits above it.
+#
+# Distance is measured to each gap's NEAR EDGE, in Check 5. There is no
+# distance threshold: a gap below rejects at any range, which is how
+# this category already treated a lone gap below before the nearest-gap
+# rule existed.
 
 def _eval_cat5(s2: Stage2Result) -> bool:
     g = s2.gaps
-    if g.has_gap_above:
-        return True
     if g.price_inside_gap:
         return True
-    if (not g.has_gap_above) and (not g.has_gap_below):
+    if not g.gaps:
         return True
-    return False
+    return g.nearest_position == POS_ABOVE
 
 
 # Category 6 — CCI ---------------------------------------------------------

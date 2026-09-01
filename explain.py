@@ -17,7 +17,8 @@ from ma20_screener.config_loader import load_config
 from ma20_screener.logger import setup_logger
 from ma20_screener.stage1_data.orchestrator import run_stage1
 from ma20_screener.stage2_checks.orchestrator import run_stage2
-from ma20_screener.stage3_filter.filter import _eval_cat4, _eval_cat7, evaluate
+from ma20_screener.stage3_filter.filter import (
+    _eval_cat4, _eval_cat5, _eval_cat7, evaluate)
 
 
 def cat4_why(mult: float, max_above: float, min_below: float) -> str:
@@ -65,6 +66,18 @@ def main() -> int:
         print(f"               multiplier {mult:+.2f}   "
               f"{'PASS' if _eval_cat4(s2, rt.sma20_max_atr_above, rt.sma20_min_atr_below) else 'REJECT'}"
               f"  ({cat4_why(mult, rt.sma20_max_atr_above, rt.sma20_min_atr_below)})")
+        gp = s2.gaps
+        if gp.price_inside_gap:
+            gtxt = "price is inside a gap"
+        elif not gp.gaps:
+            gtxt = "no open gaps"
+        else:
+            gtxt = (f"nearest gap {gp.nearest_position} at "
+                    f"{gp.nearest_distance_atr:.2f} ATR"
+                    f"  (above={gp.has_gap_above} below={gp.has_gap_below})")
+        print(f"  CATEGORY 5   {gtxt}")
+        print(f"               {'PASS' if _eval_cat5(s2) else 'REJECT'}"
+              f"  (the nearest gap decides)")
         print(f"  CATEGORY 7   52w low {lp.low_52w:,.2f} "
               f"(from {lp.low_52w_sessions} sessions)")
         print(f"               lowest low of last {lp.lookback_sessions} "

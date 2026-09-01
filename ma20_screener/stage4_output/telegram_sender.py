@@ -33,16 +33,25 @@ _VOLUME_TEXTS = {
 
 
 def _gap_text(d: FilterDecision) -> str:
+    """Lead with the nearest gap, since that is what Category 5 ruled on.
+    A ticker only reaches Telegram with its nearest gap above it (or none
+    at all, or the price already inside one), so this reads as context
+    for the trade rather than a verdict."""
     g = d.s2.gaps
     if g.price_inside_gap:
         return "price inside a gap"
-    if g.has_gap_above and g.has_gap_below:
-        return "open above and below"
-    if g.has_gap_above:
-        return "open above"
-    if g.has_gap_below:
-        return "open below"
-    return "no open gaps"
+    if not g.gaps:
+        return "no open gaps"
+    dist = ("" if not isfinite(g.nearest_distance_atr)
+            else f" {g.nearest_distance_atr:.1f} ATR away")
+    # Only worth noting the other side when it is not the side we just
+    # named, otherwise the line reads "nearest gap below (another below)".
+    other = ""
+    if g.nearest_position == POS_ABOVE and g.has_gap_below:
+        other = " (one below too)"
+    elif g.nearest_position == POS_BELOW and g.has_gap_above:
+        other = " (one above too)"
+    return f"nearest gap {g.nearest_position}{dist}{other}"
 
 
 def _candle_text(d: FilterDecision) -> str:

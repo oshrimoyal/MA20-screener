@@ -108,7 +108,7 @@ no scoring. Every passing ticker is sent, unranked and uncapped.
 | 2 | Candle | last candle is green **and** matches one of 11 bullish formations |
 | 3 | Volume | one of three accepted 5-day volume stories holds, and it is not the fifth green day running |
 | 4 | SMA 20 | less than 2.0 ATR% above the average, **or** more than 1.5 ATR% below it |
-| 5 | Gaps | not every open gap is below the price |
+| 5 | Gaps | the **nearest** open gap is above the price (or the price is inside one, or there are none) |
 | 6 | CCI 14 | rising, and between −120 and +130 |
 | 7 | 52-week low | the lowest low of the last 10 sessions is at least 20% above the 52-week low |
 
@@ -148,6 +148,35 @@ and `runtime.sma20_min_atr_below` in `config.yaml` — no code change needed.
 
 `SMA20_Role` and `SMA20_Breakout` are still computed and still written to
 the CSV and the Telegram message, but they no longer affect the decision.
+
+### Category 5 — the nearest gap decides
+
+Category 5 used to pass the moment any open gap sat above the price, no
+matter how far. A gap 15 ATR overhead could excuse one half an ATR
+underfoot — and it is the near one that actually pulls the price.
+
+Every open gap is now measured to its **near edge** — the first level the
+price would touch — and the closest one carries the verdict:
+
+| Situation | Result |
+|---|---|
+| price is inside a gap | passes (it is filling it now; no magnet left) |
+| no open gaps at all | passes |
+| nearest gap is **above** | passes — room overhead |
+| nearest gap is **below** | **rejected**, whatever sits above it |
+
+There is no distance threshold: a gap below rejects at any range, which
+is how this category already treated a lone gap below. An exact tie
+resolves to below.
+
+Distance is reported in ATR units (`Gap_Nearest_ATR`), but the ranking
+uses the raw price distance — every gap on a ticker divides by the same
+ATR, so the order is identical either way, and ranking on the raw figure
+keeps the check well-defined if ATR ever collapses to zero.
+
+Note that gaps are only found inside the 60-session analysis window; one
+that formed before it does not exist as far as this category is
+concerned.
 
 ### Category 7 — distance from the 52-week low
 

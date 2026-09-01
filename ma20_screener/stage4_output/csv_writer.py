@@ -31,6 +31,8 @@ CSV_COLUMNS = [
     "Gap_Above",
     "Gap_Below",
     "Gap_Inside",
+    "Gap_Nearest",
+    "Gap_Nearest_ATR",
     "CCI_Value",
     "CCI_Slope",
     "CCI_Zone",
@@ -84,6 +86,11 @@ def _row(d: FilterDecision) -> dict[str, object]:
         "Gap_Above": "Yes" if s.gaps.has_gap_above else "No",
         "Gap_Below": "Yes" if s.gaps.has_gap_below else "No",
         "Gap_Inside": "Yes" if s.gaps.price_inside_gap else "No",
+        # Which side the closest open gap sits on — the one Category 5
+        # decides on — and how far away it is in ATR units.
+        "Gap_Nearest": s.gaps.nearest_position,
+        "Gap_Nearest_ATR": ("" if not isfinite(s.gaps.nearest_distance_atr)
+                            else f"{s.gaps.nearest_distance_atr:.2f}"),
         "CCI_Value": f"{s.cci.cci_today:.2f}",
         "CCI_Slope": s.cci.slope_direction,
         "CCI_Zone": s.cci.zone,
