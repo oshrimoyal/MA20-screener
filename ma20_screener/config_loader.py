@@ -135,7 +135,7 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         sma20_min_atr_below=float(rt_raw.get("sma20_min_atr_below", 1.5)),
         history_long_trading_days=int(rt_raw.get("history_long_trading_days", 252)),
         low52w_lookback_sessions=int(rt_raw.get("low52w_lookback_sessions", 10)),
-        low52w_min_pct_above=float(rt_raw.get("low52w_min_pct_above", 10.0)),
+        low52w_min_pct_above=float(rt_raw.get("low52w_min_pct_above", 20.0)),
         test_tickers=test_tickers,
         fmp_api_key=fmp_api_key,
     )

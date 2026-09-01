@@ -95,7 +95,7 @@ runtime:
   # low52w_lookback_sessions to look further back for a visit to the low
   # (stricter); lower it to only care about very recent action.
   low52w_lookback_sessions: 10
-  low52w_min_pct_above: 10.0
+  low52w_min_pct_above: 20.0
 
   # ---- Category 4: distance from the SMA 20 ----
   # The distance is measured the way you read it on a chart: the gap

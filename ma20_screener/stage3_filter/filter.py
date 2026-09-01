@@ -72,7 +72,7 @@ DEFAULT_SMA20_MAX_ATR_ABOVE = 2.0
 DEFAULT_SMA20_MIN_ATR_BELOW = 1.5
 
 # Category 7 threshold. Overridden per-run from config.yaml.
-DEFAULT_LOW52W_MIN_PCT_ABOVE = 10.0
+DEFAULT_LOW52W_MIN_PCT_ABOVE = 20.0
 
 
 @dataclass(frozen=True)

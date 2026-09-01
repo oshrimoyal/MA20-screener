@@ -110,7 +110,7 @@ no scoring. Every passing ticker is sent, unranked and uncapped.
 | 4 | SMA 20 | less than 2.0 ATR% above the average, **or** more than 1.5 ATR% below it |
 | 5 | Gaps | not every open gap is below the price |
 | 6 | CCI 14 | rising, and between −120 and +130 |
-| 7 | 52-week low | the lowest low of the last 10 sessions is at least 10% above the 52-week low |
+| 7 | 52-week low | the lowest low of the last 10 sessions is at least 20% above the 52-week low |
 
 Ahead of all of it, Stage 1 admits only NASDAQ/NYSE symbols above $1B
 market cap with a 14-session average volume over 1M shares, 60 complete
@@ -157,7 +157,7 @@ Categories 2-6 can tell them apart.
 
 The check takes the **lowest low of the last 10 sessions** — not the last
 close — so a stock that tagged its low last week and has since bounced is
-still caught. That low must sit at least **10% above the 52-week low**:
+still caught. That low must sit at least **20% above the 52-week low**:
 
 ```
 percent above = (recent low - 52-week low) / 52-week low * 100
