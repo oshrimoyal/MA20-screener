@@ -55,7 +55,9 @@ def _format_reason(d: FilterDecision) -> str:
 
 
 def _chart_link(exchange: str, ticker: str) -> str:
-    # yfinance-style tickers use '-' where TradingView still uses '.'.
+    # Phase A normalises FMP's 'BRK.B' to the internal 'BRK-B'; TradingView
+    # wants the dot back. (yfinance, which the '-' form originally came
+    # from, has not been part of this pipeline for a long time.)
     tv_ticker = ticker.replace("-", ".")
     return f"https://www.tradingview.com/chart/?symbol={exchange}:{tv_ticker}"
 
