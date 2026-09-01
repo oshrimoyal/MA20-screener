@@ -1,4 +1,4 @@
-"""Stage 2 orchestrator: run the six raw checks for every ticker."""
+"""Stage 2 orchestrator: run the seven raw checks for every ticker."""
 from __future__ import annotations
 
 from dataclasses import dataclass

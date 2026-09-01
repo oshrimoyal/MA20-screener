@@ -46,6 +46,15 @@ class RuntimeConfig:
     # side, and a close exactly on the average is rejected.
     sma20_max_atr_above: float
     sma20_min_atr_below: float
+    # Trading days pulled per ticker. Same single FMP call, wider date
+    # range — no extra calls. Used ONLY to locate the 52-week low; every
+    # indicator and category still runs on `history_trading_days`.
+    history_long_trading_days: int
+    # Category 7 (distance from the 52-week low). The lowest low of the
+    # last `low52w_lookback_sessions` sessions must sit at least
+    # `low52w_min_pct_above` percent above the 52-week low.
+    low52w_lookback_sessions: int
+    low52w_min_pct_above: float
     test_tickers: list[str]
     # FMP API key (Starter tier or higher — Basic free tier is too
     # constrained at this universe size). Validated by `load_config`.
@@ -124,6 +133,9 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         # before these thresholds existed keeps the intended behaviour.
         sma20_max_atr_above=float(rt_raw.get("sma20_max_atr_above", 2.0)),
         sma20_min_atr_below=float(rt_raw.get("sma20_min_atr_below", 1.5)),
+        history_long_trading_days=int(rt_raw.get("history_long_trading_days", 252)),
+        low52w_lookback_sessions=int(rt_raw.get("low52w_lookback_sessions", 10)),
+        low52w_min_pct_above=float(rt_raw.get("low52w_min_pct_above", 10.0)),
         test_tickers=test_tickers,
         fmp_api_key=fmp_api_key,
     )

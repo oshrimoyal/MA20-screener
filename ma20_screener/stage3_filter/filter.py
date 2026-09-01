@@ -1,4 +1,4 @@
-"""Stage 3 — six-category filter (AND between categories).
+"""Stage 3 — seven-category filter (AND between categories).
 
 A ticker passes iff every active category passes. The function also
 reports which categories failed (for the CSV "Reason" column) and, when
@@ -27,6 +27,15 @@ NOTE — Category 4 is a pure distance test.
     Telegram message — they are informational only. Both thresholds
     come from config.yaml.
 
+NOTE — Category 7 added.
+    Category 7 rejects a ticker whose recent price action sits too close
+    to its 52-week low. The lowest low of the last
+    `low52w_lookback_sessions` sessions must be at least
+    `low52w_min_pct_above` percent above the 52-week low. The intent is
+    to keep falling knives out: a stock camped on its lows is in a
+    downtrend, which the other categories cannot distinguish from a
+    pullback. Both values come from config.yaml.
+
 For passing tickers we additionally surface:
   * volume_positive_option (1-4): which Category 3 positive option held —
     used by Stage 4 to write the concise volume description in Telegram.
@@ -34,6 +43,7 @@ For passing tickers we additionally surface:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from ma20_screener.logger import (
     get_logger,
@@ -60,6 +70,9 @@ MOMENTUM_FORMATIONS = frozenset({BULLISH_MARUBOZU, THREE_WHITE_SOLDIERS})
 # defaults keep `evaluate()` callable without a config.
 DEFAULT_SMA20_MAX_ATR_ABOVE = 2.0
 DEFAULT_SMA20_MIN_ATR_BELOW = 1.5
+
+# Category 7 threshold. Overridden per-run from config.yaml.
+DEFAULT_LOW52W_MIN_PCT_ABOVE = 10.0
 
 
 @dataclass(frozen=True)
@@ -221,12 +234,37 @@ def _eval_cat6(s2: Stage2Result) -> bool:
     )
 
 
+# Category 7 — distance from the 52-week low --------------------------------
+# Check 7 reports how far the lowest low of the recent lookback window
+# sits above the 52-week low, in percent. A ticker passes only when that
+# clearance reaches `min_pct_above`.
+#
+# The comparison is inclusive — a stock exactly at the threshold passes.
+# It is the floor that matters here, not the exact boundary.
+#
+# A non-finite percentage means Check 7 could not evaluate the ticker: a
+# 52-week low that is not a positive price, i.e. a broken feed. That is
+# rejected rather than waved through. Everywhere else in this pipeline
+# unusable data drops a ticker, and passing one on a bad denominator
+# would be the odd one out.
+
+def _eval_cat7(
+    s2: Stage2Result,
+    min_pct_above: float = DEFAULT_LOW52W_MIN_PCT_ABOVE,
+) -> bool:
+    pct = s2.low_proximity.pct_above_low
+    if not isfinite(pct):
+        return False
+    return pct >= min_pct_above
+
+
 # Entry points -------------------------------------------------------------
 
 def evaluate(
     s2: Stage2Result,
     sma20_max_atr_above: float = DEFAULT_SMA20_MAX_ATR_ABOVE,
     sma20_min_atr_below: float = DEFAULT_SMA20_MIN_ATR_BELOW,
+    low52w_min_pct_above: float = DEFAULT_LOW52W_MIN_PCT_ABOVE,
 ) -> FilterDecision:
     # Category 1 is intentionally not evaluated for the pass/reject
     # decision (operator decision — see module docstring). The monthly
@@ -239,6 +277,7 @@ def evaluate(
     cat4 = _eval_cat4(s2, sma20_max_atr_above, sma20_min_atr_below)
     cat5 = _eval_cat5(s2)
     cat6 = _eval_cat6(s2)
+    cat7 = _eval_cat7(s2, low52w_min_pct_above)
 
     failed: list[int] = []
     # Category 1 deliberately omitted.
@@ -252,6 +291,8 @@ def evaluate(
         failed.append(5)
     if not cat6:
         failed.append(6)
+    if not cat7:
+        failed.append(7)
 
     return FilterDecision(
         s2=s2,
@@ -266,16 +307,23 @@ def run_stage3(
     items: list[Stage2Result],
     sma20_max_atr_above: float = DEFAULT_SMA20_MAX_ATR_ABOVE,
     sma20_min_atr_below: float = DEFAULT_SMA20_MIN_ATR_BELOW,
+    low52w_min_pct_above: float = DEFAULT_LOW52W_MIN_PCT_ABOVE,
 ) -> list[FilterDecision]:
     log = get_logger()
-    log_stage_start("STAGE 3 (six-category filter)")
+    log_stage_start("STAGE 3 (category filter)")
     log.info(
         f"Stage 3: Category 4 passes when the close is above the SMA 20 by "
         f"less than {sma20_max_atr_above:g} ATR%, or below it by more than "
         f"{sma20_min_atr_below:g} ATR%."
     )
+    log.info(
+        f"Stage 3: Category 7 rejects a ticker whose recent low sits less "
+        f"than {low52w_min_pct_above:g}% above its 52-week low."
+    )
     decisions = [
-        evaluate(s, sma20_max_atr_above, sma20_min_atr_below) for s in items
+        evaluate(s, sma20_max_atr_above, sma20_min_atr_below,
+                 low52w_min_pct_above)
+        for s in items
     ]
     passed = sum(1 for d in decisions if d.passed)
     log_stage_summary("STAGE 3", entered=len(items), passed=passed)

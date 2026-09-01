@@ -3,7 +3,7 @@
 A daily long-side stock screener over the NYSE + NASDAQ universe —
 every listed symbol above $1B market cap, ETFs, closed-end funds and
 ADRs included. The system applies a
-6-category filter to every closed-candle session and emits both a
+7-category filter to every closed-candle session and emits both a
 per-run CSV (all stocks, passed + rejected) and a Telegram broadcast
 of the day's candidates.
 
@@ -42,30 +42,41 @@ git pull origin main
 # 2. (First time on a machine) install Python deps
 pip install -r requirements.txt
 
-# 3. Edit config.yaml with your real values. The fields you MUST set:
+# 3. Put your secrets in config.local.yaml, NOT config.yaml.
+#    config.yaml is tracked by git, so local edits to it collide on
+#    every pull and branch switch. config.local.yaml is gitignored and
+#    never will.
+cp config.yaml config.local.yaml     # Windows: copy config.yaml config.local.yaml
+nano config.local.yaml               # or any editor
+
+#    The three fields you MUST set:
 #       telegram.token
 #       telegram.chat_id
 #       runtime.fmp_api_key
-#    Leave runtime.test_tickers empty for a full universe scan, or
-#    set it to a comma-separated list (e.g. "AAPL,MSFT,NVDA") for a
-#    fast smoke test.
-nano config.yaml   # or any editor
+#    Leave runtime.test_tickers empty for a full universe scan, or set
+#    it to a comma-separated list ("AAPL,MSFT,NVDA") for a smoke test.
 
 # 4. Run
-python main.py
+python main.py --config config.local.yaml
 ```
 
-Expected runtime for a full NASDAQ+NYSE >= $1B run (~1,900 tickers):
+Expected wall-clock for a full NASDAQ+NYSE >= $1B run (~1,900 tickers):
+**~8-9 minutes.**
 
-| `history_workers` × `history_sleep_ms` | Wall-clock |
-|---|---|
-| 1 × 250 (defaults shipped in `config.yaml`) | ~27 minutes |
-| **4 × 400 (recommended)** | **~8 minutes** |
+The floor is set by your FMP quota, not by the machine. Phase B makes
+one call per ticker and a shared rate limiter hands out evenly spaced
+slots at `runtime.history_rate_per_min` (295, just under Starter's 300),
+so the run takes `tickers ÷ 295` minutes no matter how fast FMP answers
+on the day. `history_workers` is **not** the throttle — it only caps how
+many calls may be in flight, and 8 is plenty.
 
-Bumping `history_workers` to 4 keeps us at ~4 calls/sec, safely under
-FMP Starter's 300 calls/min ceiling. If you ever see
-`fmp historical rate-limited after N attempts` in the log, lower
-`history_workers` back to 1 or raise `history_sleep_ms`.
+The end of Phase B logs the rate actually achieved. If it lands well
+under the ceiling, raise `history_workers`. If you see
+`fmp historical rate-limited` in the log, lower `history_rate_per_min`.
+
+Widening the history window to 252 sessions for the 52-week low costs
+**nothing here** — it is the same one call per ticker with a wider date
+range, and the limiter, not the payload, sets the pace.
 
 Outputs after each run:
 
@@ -82,8 +93,40 @@ Pipeline stages live in `ma20_screener/`:
 | Stage | Module |
 |---|---|
 | 1. Data infrastructure | `stage1_data/` (Phase A FMP `company-screener` for the NASDAQ+NYSE >= $1B universe, Phase B FMP OHLCV with strict validation + liquidity gate — market cap >= $1B **and** 14-session average volume > 1M shares, Phase C SMA20 / Wilder ATR% / Lambert CCI14 / open gaps) |
-| 2. Six raw checks | `stage2_checks/` (trend, candle + 11 formations, 7-day volume, SMA20 position, gaps vs price, CCI status) |
-| 3. Category AND filter | `stage3_filter/filter.py` — Categories 2-6 decide; Category 1 (trend) is computed but disabled |
+| 2. Seven raw checks | `stage2_checks/` (trend, candle + 11 formations, 7-day volume, SMA20 position, gaps vs price, CCI status, 52-week-low proximity) |
+| 3. Category AND filter | `stage3_filter/filter.py` — Categories 2-7 decide; Category 1 (trend) is computed but disabled |
+
+## What actually decides
+
+A ticker reaches Telegram only if it clears **every** active category.
+It is a plain AND — one failure and it is out, with no rescue path and
+no scoring. Every passing ticker is sent, unranked and uncapped.
+
+| # | Category | Passes when |
+|---|---|---|
+| 1 | Trend | **disabled** — computed and reported, never rejects |
+| 2 | Candle | last candle is green **and** matches one of 11 bullish formations |
+| 3 | Volume | one of three accepted 5-day volume stories holds, and it is not the fifth green day running |
+| 4 | SMA 20 | less than 2.0 ATR% above the average, **or** more than 1.5 ATR% below it |
+| 5 | Gaps | not every open gap is below the price |
+| 6 | CCI 14 | rising, and between −120 and +130 |
+| 7 | 52-week low | the lowest low of the last 10 sessions is at least 10% above the 52-week low |
+
+Ahead of all of it, Stage 1 admits only NASDAQ/NYSE symbols above $1B
+market cap with a 14-session average volume over 1M shares, 60 complete
+sessions of data, and finite indicators.
+
+### Diagnostics
+
+`explain.py` prints the numbers behind Categories 4 and 7 per ticker,
+with the verdict and the reason. It reads only — no CSV, no Telegram:
+
+```bash
+python explain.py --config config.local.yaml
+```
+
+Point `runtime.test_tickers` at a handful of symbols first; leave it
+empty to explain the whole universe.
 
 ### Category 4 — distance from the SMA 20
 
@@ -105,4 +148,36 @@ and `runtime.sma20_min_atr_below` in `config.yaml` — no code change needed.
 
 `SMA20_Role` and `SMA20_Breakout` are still computed and still written to
 the CSV and the Telegram message, but they no longer affect the decision.
+
+### Category 7 — distance from the 52-week low
+
+Rejects stocks camped on their lows. A stock in a downtrend prints the
+same green candles and volume patterns as one in a pullback; nothing in
+Categories 2-6 can tell them apart.
+
+The check takes the **lowest low of the last 10 sessions** — not the last
+close — so a stock that tagged its low last week and has since bounced is
+still caught. That low must sit at least **10% above the 52-week low**:
+
+```
+percent above = (recent low - 52-week low) / 52-week low * 100
+```
+
+Below the threshold, the ticker is rejected outright. Like every other
+category this is a hard AND — there is no rescue path.
+
+The 52-week low costs **no extra API call**. Phase B already makes one
+`historical-price-eod/full` request per ticker; it now asks for 252
+sessions instead of 60 in that same request (FMP Starter allows 5 years
+per call). The extra sessions are used **only** to locate the low —
+every indicator and every other category still runs on the last 60
+sessions, because widening the analysis window would make Category 5
+count year-old gaps and flip verdicts.
+
+A ticker listed less than 52 weeks ago is **not** dropped: its low comes
+from whatever history exists, and `Low_52W_Sessions` in the CSV reports
+how many sessions that was.
+
+Tune via `runtime.low52w_min_pct_above` and
+`runtime.low52w_lookback_sessions` in `config.yaml`.
 | 4. CSV + Telegram | `stage4_output/csv_writer.py`, `stage4_output/telegram_sender.py` |

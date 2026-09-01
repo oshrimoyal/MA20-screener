@@ -1,1 +1,1 @@
-# Stage 2: the six raw checks.
+# Stage 2: the seven raw checks.
