@@ -54,6 +54,11 @@ class TickerData:
     cci_today: float
     cci_yesterday: float
     open_gaps: list[OpenGap]
+    # Carried through from Phase B. `ohlcv` above is still exactly the
+    # analysis window; these two describe the wider lookback used only
+    # by Check 7 / Category 7.
+    low_52w: float
+    low_52w_sessions: int
 
 
 def _sma(series: pd.Series, length: int) -> pd.Series:
@@ -208,6 +213,8 @@ def compute_indicators(entry: HistoryEntry) -> TickerData | None:
         cci_today=float(cci_today),
         cci_yesterday=float(cci_yest),
         open_gaps=gaps,
+        low_52w=entry.low_52w,
+        low_52w_sessions=entry.low_52w_sessions,
     )
 
 

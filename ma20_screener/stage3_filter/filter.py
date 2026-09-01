@@ -16,6 +16,15 @@ NOTE — Category 1 disabled.
     re-enabled later — to re-enable, restore the call site in
     `evaluate()`.
 
+NOTE — Category 7 added.
+    Category 7 rejects a ticker whose recent price action sits too close
+    to its 52-week low. The lowest low of the last
+    `low52w_lookback_sessions` sessions must be at least
+    `low52w_min_pct_above` percent above the 52-week low. The intent is
+    to keep falling knives out — a stock camped on its lows is in a
+    downtrend, which the other categories cannot distinguish from a
+    pullback. Both values come from config.yaml.
+
 For passing tickers we additionally surface:
   * volume_positive_option (1-4): which Category 3 positive option held —
     used by Stage 4 to write the concise volume description in Telegram.
@@ -23,6 +32,7 @@ For passing tickers we additionally surface:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from ma20_screener.logger import (
     get_logger,
@@ -195,6 +205,32 @@ def _eval_cat6(s2: Stage2Result) -> bool:
     )
 
 
+# Category 7 — distance from the 52-week low --------------------------------
+# Check 7 reports how far the lowest low of the recent lookback window
+# sits above the 52-week low, in percent. A ticker passes only when that
+# clearance reaches `min_pct_above`.
+#
+# The comparison is inclusive: a stock exactly at the threshold passes.
+# It is the floor that matters here, not the exact boundary, and the
+# other two thresholds in this file already reject on their edges — one
+# inclusive boundary among them is deliberate, not an oversight.
+#
+# A non-finite percentage means Check 7 could not evaluate the ticker
+# (a 52-week low that is not a positive price — a broken feed). That is
+# rejected rather than waved through: everywhere else in this pipeline
+# unusable data drops a ticker, and silently passing one on a bad
+# denominator would be the odd one out.
+
+def _eval_cat7(
+    s2: Stage2Result,
+    min_pct_above: float = DEFAULT_LOW52W_MIN_PCT_ABOVE,
+) -> bool:
+    pct = s2.low_proximity.pct_above_low
+    if not isfinite(pct):
+        return False
+    return pct >= min_pct_above
+
+
 # Entry points -------------------------------------------------------------
 
 def evaluate(s2: Stage2Result) -> FilterDecision:
@@ -209,6 +245,7 @@ def evaluate(s2: Stage2Result) -> FilterDecision:
     cat4 = _eval_cat4(s2)
     cat5 = _eval_cat5(s2)
     cat6 = _eval_cat6(s2)
+    cat7 = _eval_cat7(s2, low52w_min_pct_above)
 
     failed: list[int] = []
     # Category 1 deliberately omitted.
@@ -222,6 +259,8 @@ def evaluate(s2: Stage2Result) -> FilterDecision:
         failed.append(5)
     if not cat6:
         failed.append(6)
+    if not cat7:
+        failed.append(7)
 
     return FilterDecision(
         s2=s2,

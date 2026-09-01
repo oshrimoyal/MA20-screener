@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from datetime import date
+from math import isfinite
 from typing import Iterable
 
 import requests
@@ -71,6 +72,16 @@ def _volume_text(d: FilterDecision) -> str:
     return _VOLUME_TEXTS.get(d.volume_positive_option, "green")
 
 
+def _low_text(d: FilterDecision) -> str:
+    """Every other line in the block maps to one category; Category 7
+    gets one too. A ticker only reaches Telegram once it cleared the
+    threshold, so this is context for sizing the trade, not a verdict."""
+    lp = d.s2.low_proximity
+    if not isfinite(lp.pct_above_low):
+        return "52w low unavailable"
+    return f"{lp.pct_above_low:.0f}% above the 52-week low ({lp.low_52w:,.2f})"
+
+
 def _chart_link(exchange: str, ticker: str) -> str:
     tv_ticker = ticker.replace("-", ".")
     return f"https://www.tradingview.com/chart/?symbol={exchange}:{tv_ticker}"
@@ -87,6 +98,7 @@ def _format_stock_block(d: FilterDecision) -> str:
         f"📏 SMA20: {_sma_text(d)}\n\n"
         f"⚡ Gap: {_gap_text(d)}\n\n"
         f"🌡 CCI: {s.cci.cci_today:.0f}, slope {s.cci.slope_direction.lower()}\n\n"
+        f"🛡 Low: {_low_text(d)}\n\n"
         f"🔗 {_chart_link(s.exchange, s.ticker)}"
     )
 

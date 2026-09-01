@@ -39,6 +39,15 @@ class RuntimeConfig:
     min_market_cap_usd: float
     min_volume_ma: float
     history_trading_days: int
+    # Trading days pulled per ticker. Same single FMP call, wider date
+    # range — no extra calls. Used ONLY to locate the 52-week low; every
+    # indicator and category still runs on `history_trading_days`.
+    history_long_trading_days: int
+    # Category 7 (distance from the 52-week low). The lowest low of the
+    # last `low52w_lookback_sessions` sessions must sit at least
+    # `low52w_min_pct_above` percent above the 52-week low.
+    low52w_lookback_sessions: int
+    low52w_min_pct_above: float
     test_tickers: list[str]
     # FMP API key (Starter tier or higher — Basic free tier is too
     # constrained at this universe size). Validated by `load_config`.
@@ -113,6 +122,11 @@ def load_config(path: str | os.PathLike = "config.yaml") -> AppConfig:
         # threshold existed keep the intended behaviour.
         min_volume_ma=float(rt_raw.get("min_volume_ma", 1_000_000)),
         history_trading_days=int(_require(rt_raw, "history_trading_days", "runtime")),
+        # Defaults match the shipped config.yaml so a config written
+        # before these keys existed keeps working.
+        history_long_trading_days=int(rt_raw.get("history_long_trading_days", 252)),
+        low52w_lookback_sessions=int(rt_raw.get("low52w_lookback_sessions", 10)),
+        low52w_min_pct_above=float(rt_raw.get("low52w_min_pct_above", 10.0)),
         test_tickers=test_tickers,
         fmp_api_key=fmp_api_key,
     )

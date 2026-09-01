@@ -28,6 +28,7 @@ def run_stage1(cfg: AppConfig) -> list[TickerData]:
     histories = run_phase_b(
         universe=universe,
         history_trading_days=cfg.runtime.history_trading_days,
+        long_trading_days=cfg.runtime.history_long_trading_days,
         workers=cfg.runtime.history_workers,
         fetch_sleep_ms=cfg.runtime.history_sleep_ms,
         min_market_cap_usd=cfg.runtime.min_market_cap_usd,

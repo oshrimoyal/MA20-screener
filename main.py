@@ -44,13 +44,19 @@ def main() -> int:
         f"min_mcap=${cfg.runtime.min_market_cap_usd:,.0f} "
         f"min_volume_ma={cfg.runtime.min_volume_ma:,.0f} "
         f"history_days={cfg.runtime.history_trading_days} "
+        f"history_long_days={cfg.runtime.history_long_trading_days} "
+        f"low52w_lookback={cfg.runtime.low52w_lookback_sessions} "
+        f"low52w_min_pct_above={cfg.runtime.low52w_min_pct_above:g} "
         f"fmp_api_key={'<set>' if cfg.runtime.fmp_api_key else '<missing>'} "
         f"test_tickers={cfg.runtime.test_tickers or '(none)'}"
     )
 
     t0 = time.time()
     stage1_results = run_stage1(cfg)
-    stage2_results = run_stage2(stage1_results)
+    stage2_results = run_stage2(
+        stage1_results,
+        low52w_lookback_sessions=cfg.runtime.low52w_lookback_sessions,
+    )
     decisions = run_stage3(stage2_results)
 
     # The "run date" used for the CSV file name and Telegram header is the

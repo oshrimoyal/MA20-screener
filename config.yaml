@@ -57,8 +57,45 @@ runtime:
   # a ticker's fate. The ticker must exceed this value STRICTLY
   # (an average of exactly 1,000,000 is rejected).
   min_volume_ma: 1000000
-  # Number of trading days of OHLCV history required.
+  # Number of trading days of OHLCV history required. Every one of
+  # these sessions must be present and complete or the ticker is
+  # dropped, and ALL indicator and category maths runs on this window
+  # and nothing longer.
   history_trading_days: 60
+
+  # ---- 52-week low lookback ----
+  # Trading days of history pulled per ticker. This is the SAME single
+  # FMP call as before with a wider date range, so it costs no extra
+  # calls and no extra runtime (the rate limiter sets the pace, not the
+  # payload size). FMP Starter allows up to 5 years per call, so 252 is
+  # well inside the allowance.
+  #
+  # These extra sessions are used for ONE thing: finding the 52-week
+  # low. They deliberately do NOT feed the indicators or the other
+  # categories — widening the analysis window would change Category 5,
+  # which would start counting year-old gaps and flip verdicts.
+  #
+  # A ticker with less history than this (listed recently) is NOT
+  # dropped: its low is taken from whatever sessions it does have, and
+  # the CSV reports how many were used.
+  history_long_trading_days: 252
+
+  # ---- Category 7: distance from the 52-week low ----
+  # Rejects stocks sitting on their lows. The check takes the LOWEST
+  # LOW of the last `low52w_lookback_sessions` sessions — not just the
+  # last close — so a stock that touched its low last week and has since
+  # bounced is still caught.
+  #
+  # That low is then compared to the 52-week low:
+  #     percent above = (recent low - 52w low) / 52w low * 100
+  # A ticker is REJECTED when this is below `low52w_min_pct_above`.
+  #
+  # Raise low52w_min_pct_above to demand more clearance above the low
+  # (fewer candidates); lower it to be more permissive. Raise
+  # low52w_lookback_sessions to look further back for a visit to the
+  # low (stricter); lower it to only care about very recent action.
+  low52w_lookback_sessions: 10
+  low52w_min_pct_above: 10.0
   # Optional: limit Phase A to this comma-separated list of tickers (testing).
   # Leave empty for a full S&P 500 scan.
   test_tickers: ""

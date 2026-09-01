@@ -51,6 +51,15 @@ class HistoryEntry:
     market_cap: float
     volume_ma: float  # Mean Volume over the last _VOLUME_MA_DAYS closed sessions
     ohlcv: pd.DataFrame  # exactly N rows, indexed by trading date, columns = _OHLCV_COLS
+    # Lowest Low across the long window (see `long_trading_days`). Kept
+    # as a single number rather than a second DataFrame: the long window
+    # exists only to locate this value, and every downstream stage must
+    # keep seeing exactly the `ohlcv` frame above and nothing longer.
+    low_52w: float
+    # How many sessions that low was actually derived from. Below
+    # `long_trading_days` for a recently listed ticker, which is not an
+    # error — the ticker is still evaluated, against the history it has.
+    low_52w_sessions: int
 
 
 def _validate_history(
@@ -91,6 +100,30 @@ def _validate_history(
 
     aligned = aligned.astype(float)
     return aligned, None
+
+
+def _long_window_low(
+    raw: Optional[pd.DataFrame],
+    fallback: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[float, int]:
+    """Lowest Low over [start, end] from the raw FMP frame.
+
+    Deliberately lenient, unlike `_validate_history`: the long window is
+    a lookback, not an analysis window, so holes in it are tolerated and
+    a ticker listed part-way through simply gets a shorter lookback. If
+    the raw frame is unusable we fall back to the validated short window,
+    which is never empty by the time this runs.
+
+    Returns (low, sessions_used)."""
+    if raw is not None and "Low" in raw.columns and not raw.empty:
+        window = raw.loc[(raw.index >= start) & (raw.index <= end), "Low"]
+        window = window.dropna()
+        if not window.empty:
+            return float(window.min()), int(len(window))
+    lows = fallback["Low"]
+    return float(lows.min()), int(len(lows))
 
 
 def _fetch_with_retry(
@@ -141,6 +174,7 @@ def _fetch_with_retry(
 def run_phase_b(
     universe: list[UniverseEntry],
     history_trading_days: int,
+    long_trading_days: int,
     workers: int,
     fetch_sleep_ms: int,
     min_market_cap_usd: float,
@@ -166,9 +200,19 @@ def run_phase_b(
     log = get_logger()
     log_stage_start("STAGE 1 — Phase B (FMP OHLCV + marketCap/volume filter)")
 
+    # Two windows, one call. `expected_dates` is the analysis window that
+    # every indicator and category still runs on, validated strictly.
+    # `long_dates` only widens the date range we ask FMP for, so the
+    # 52-week low can be read off the same response. Same number of FMP
+    # calls; FMP Starter allows up to 5 years per call.
     expected_dates = get_last_n_closed_trading_days(history_trading_days)
+    long_dates = get_last_n_closed_trading_days(
+        max(long_trading_days, history_trading_days)
+    )
+    long_start = long_dates[0].normalize()
+    long_end = expected_dates[-1].normalize()
     pad = pd.Timedelta(days=_HISTORICAL_WINDOW_PAD_DAYS)
-    window_start = (expected_dates[0] - pad).strftime("%Y-%m-%d")
+    window_start = (long_dates[0] - pad).strftime("%Y-%m-%d")
     window_end = (expected_dates[-1] + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
     log.info(
@@ -191,6 +235,12 @@ def run_phase_b(
             "upstream latency. Set runtime.history_rate_per_min to pace "
             "against the API quota instead."
         )
+    log.info(
+        f"Phase B: 52-week-low lookback spans {len(long_dates)} sessions "
+        f"({long_start.strftime('%Y-%m-%d')} → {long_end.strftime('%Y-%m-%d')}) "
+        f"in the SAME call — indicators and categories still use only the "
+        f"last {history_trading_days} sessions."
+    )
     log.info(
         f"Phase B: liquidity gate — market cap >= ${min_market_cap_usd:,.0f} "
         f"AND {_VOLUME_MA_DAYS}-day avg volume > {min_volume_ma:,.0f} shares "
@@ -243,12 +293,20 @@ def run_phase_b(
             log_ticker_fail(u.ticker, "; ".join(failures))
             return None
 
+        # The 52-week low comes off the wider slice of the SAME response.
+        # Read after the gates so we never pay for it on a rejected
+        # ticker, and from `df` (raw) rather than `clean`, which is
+        # trimmed to the analysis window.
+        low_52w, low_sessions = _long_window_low(df, clean, long_start, long_end)
+
         return HistoryEntry(
             ticker=u.ticker,
             exchange=u.exchange,
             market_cap=u.market_cap,
             volume_ma=volume_ma,
             ohlcv=clean,
+            low_52w=low_52w,
+            low_52w_sessions=low_sessions,
         )
 
     t0 = time.monotonic()
