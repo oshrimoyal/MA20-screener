@@ -43,21 +43,21 @@ def main() -> int:
         f"history_retry_delay_s={cfg.runtime.history_retry_delay_s} "
         f"min_mcap=${cfg.runtime.min_market_cap_usd:,.0f} "
         f"min_volume_ma={cfg.runtime.min_volume_ma:,.0f} "
+        f"sma20_max_atr_above={cfg.runtime.sma20_max_atr_above:g} "
+        f"sma20_min_atr_below={cfg.runtime.sma20_min_atr_below:g} "
         f"history_days={cfg.runtime.history_trading_days} "
-        f"history_long_days={cfg.runtime.history_long_trading_days} "
-        f"low52w_lookback={cfg.runtime.low52w_lookback_sessions} "
-        f"low52w_min_pct_above={cfg.runtime.low52w_min_pct_above:g} "
         f"fmp_api_key={'<set>' if cfg.runtime.fmp_api_key else '<missing>'} "
         f"test_tickers={cfg.runtime.test_tickers or '(none)'}"
     )
 
     t0 = time.time()
     stage1_results = run_stage1(cfg)
-    stage2_results = run_stage2(
-        stage1_results,
-        low52w_lookback_sessions=cfg.runtime.low52w_lookback_sessions,
+    stage2_results = run_stage2(stage1_results)
+    decisions = run_stage3(
+        stage2_results,
+        sma20_max_atr_above=cfg.runtime.sma20_max_atr_above,
+        sma20_min_atr_below=cfg.runtime.sma20_min_atr_below,
     )
-    decisions = run_stage3(stage2_results)
 
     # The "run date" used for the CSV file name and Telegram header is the
     # date of the last closed trading day (i.e. the candle we analysed).
